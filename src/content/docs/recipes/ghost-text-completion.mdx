@@ -1,0 +1,314 @@
+---
+title: AI Ghost-Text Completion
+description: Build a Copilot-style inline AI completion UI in CodeMirror 6 — a caret widget, a Tab key that accepts when a suggestion is pending and falls through when idle, and clear-on-edit / clear-on-move rules.
+sidebar_position: 16
+---
+
+This recipe builds a complete blueprint for **Copilot-style inline AI completion**: a backend produces a suggestion, the editor renders it as faint "ghost text" right at the caret, and the user presses <kbd>Tab</kbd> to accept it. Unlike `@codemirror/autocomplete` (which renders a popup list), ghost text is an inline overlay that must coexist with normal typing — the hard parts are all in the lifecycle.
+
+This is a genuinely custom extension, not a wrapper over an existing one. The four mechanisms worth getting right are:
+
+1. Rendering the suggestion as a **widget at the caret** (`side: 1`, `aria-hidden`, `ignoreEvent()`).
+2. An **accept key that falls through** when no suggestion is pending (`Prec.highest` keymap returning `false`).
+3. Marking the accept transaction with an **annotation** so the suggestion doesn't immediately clear itself.
+4. **Clear-on-move and clear-on-edit** rules so the widget never lingers in the wrong place.
+
+## State shape
+
+The suggestion lives in a `StateField`. Alongside the suggestion text we carry a `requestId` so late/stale backend responses can be rejected (see [stale async-response rejection](./stale-response-rejection.mdx) for the full pattern):
+
+```ts
+import {
+  Annotation,
+  Prec,
+  RangeSet,
+  StateEffect,
+  StateField,
+  type Extension,
+} from "@codemirror/state";
+import {
+  Decoration,
+  EditorView,
+  WidgetType,
+  keymap,
+  type DecorationSet,
+} from "@codemirror/view";
+
+type GhostTextState = { text: string | null; requestId: number };
+
+// Set or clear the suggestion. requestId lets us drop stale responses.
+const setGhostEffect = StateEffect.define<GhostTextState>();
+
+// Marks the accept transaction so the auto-clear rule ignores it.
+const ghostAcceptAnnotation = Annotation.define<true>();
+```
+
+## The caret widget
+
+The suggestion is drawn by a `WidgetType` placed at the cursor head. Three details matter:
+
+```ts
+class GhostTextWidget extends WidgetType {
+  constructor(readonly text: string) {
+    super();
+  }
+
+  // Reuse the DOM node when the text is unchanged — avoids flicker.
+  eq(other: GhostTextWidget): boolean {
+    return this.text === other.text;
+  }
+
+  toDOM(): HTMLElement {
+    const span = document.createElement("span");
+    span.className = "cm-ghost-text";
+    // The suggestion is not part of the document — keep it out of the
+    // accessibility tree so screen readers don't announce phantom text.
+    span.setAttribute("aria-hidden", "true");
+    span.textContent = this.text;
+    return span;
+  }
+
+  // Clicks/selection inside the widget must not be treated as editor input.
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+```
+
+- **`side: 1`** (set where the decoration is created, below) places the widget *after* the caret position so the real cursor stays visually before the ghost text.
+- **`aria-hidden="true"`** keeps the un-accepted suggestion out of the accessibility tree — it is not document content yet.
+- **`ignoreEvent()` returning `true`** stops pointer/selection events inside the widget from being interpreted as edits to the document.
+
+Style it as faint inline text:
+
+```css
+.cm-ghost-text {
+  opacity: 0.4;
+  pointer-events: none;
+}
+```
+
+## The state field and the two clear rules
+
+The field's `update` is where the lifecycle lives. Read it top to bottom:
+
+```ts
+const ghostTextField = StateField.define<GhostTextState>({
+  create: () => ({ text: null, requestId: 0 }),
+
+  update(value, tr) {
+    // 1. An explicit set/clear effect always wins.
+    for (const effect of tr.effects) {
+      if (effect.is(setGhostEffect)) {
+        const next = effect.value;
+        // Drop a stale backend response (older requestId) when *setting*.
+        if (next.text !== null && next.requestId < value.requestId) {
+          return value;
+        }
+        return next;
+      }
+    }
+
+    // 2. CLEAR-ON-MOVE: cursor moved without typing → drop the suggestion,
+    //    otherwise the widget would render at the old, now-wrong position.
+    if (tr.selection && !tr.docChanged) {
+      return { text: null, requestId: value.requestId };
+    }
+
+    // 3. CLEAR-ON-EDIT: any document change that is NOT the accept insertion
+    //    invalidates the suggestion. The annotation is how we tell them apart.
+    if (tr.docChanged && !tr.annotation(ghostAcceptAnnotation)) {
+      return { text: null, requestId: value.requestId };
+    }
+
+    return value;
+  },
+
+  // Derive the decoration from the field (see the multi-field note below).
+  provide: (field) =>
+    EditorView.decorations.compute([field], (state): DecorationSet => {
+      const { text } = state.field(field);
+      if (!text) return Decoration.none;
+      const head = state.selection.main.head;
+      return RangeSet.of([
+        Decoration.widget({
+          widget: new GhostTextWidget(text),
+          side: 1,
+        }).range(head),
+      ]);
+    }),
+});
+```
+
+The two clear rules are the heart of the recipe:
+
+- **Clear-on-move** (`tr.selection && !tr.docChanged`): the user clicked elsewhere or arrowed away. The suggestion was computed for the old caret position, so it is no longer valid.
+- **Clear-on-edit** (`tr.docChanged && !tr.annotation(...)`): the user typed something. Whatever they typed diverges from the suggestion, so it must go — *unless* this very change is the accept insertion, which is exactly what the annotation guards against.
+
+:::note[Why the accept annotation is essential]
+
+Accepting a suggestion is itself a document change. Without the `ghostAcceptAnnotation` tag, clear-rule #3 would fire on the accept transaction and wipe the suggestion in the same dispatch that inserts it — harmless for the text, but it means you can never run logic that wants to *read* the just-accepted suggestion. Tagging the accept transaction lets the field distinguish "the user typed" from "we inserted the suggestion ourselves."
+
+:::
+
+## The fall-through accept key
+
+The accept key (typically <kbd>Tab</kbd>) is the trickiest binding in the whole recipe. <kbd>Tab</kbd> already does useful things in an editor (indent, move focus, accept autocomplete). We want it to accept the ghost text **only when a suggestion is pending**, and behave exactly as if our extension did not exist otherwise.
+
+The trick is a `Prec.highest` keymap whose handler **returns `false` when there is nothing to accept**. In CodeMirror, a key handler returning `false` means "I did not handle this" — the event falls through to the next handler in precedence order. So our handler intercepts <kbd>Tab</kbd> first (highest precedence), and either consumes it (suggestion pending → `return true`) or steps aside (`return false`).
+
+```ts
+function ghostTextExtension(options: { acceptKey: string }): Extension {
+  return [
+    ghostTextField,
+    Prec.highest(
+      keymap.of([
+        {
+          key: options.acceptKey, // e.g. "Tab"
+          run(view) {
+            const { text, requestId } = view.state.field(ghostTextField);
+            // No suggestion → fall through to normal Tab behavior.
+            if (!text) return false;
+
+            const { head } = view.state.selection.main;
+            view.dispatch({
+              changes: { from: head, insert: text },
+              selection: { anchor: head + text.length },
+              effects: setGhostEffect.of({ text: null, requestId }),
+              // Tell the field's clear rule this change is the accept.
+              annotations: ghostAcceptAnnotation.of(true),
+            });
+            return true; // consumed
+          },
+        },
+        {
+          key: "Escape",
+          run(view) {
+            const { text, requestId } = view.state.field(ghostTextField);
+            if (!text) return false; // nothing to dismiss → fall through
+            view.dispatch({
+              effects: setGhostEffect.of({ text: null, requestId }),
+            });
+            return true;
+          },
+        },
+      ]),
+    ),
+  ];
+}
+```
+
+:::tip[The `return false` is the whole point]
+
+`Prec.highest` only controls *order*, not *whether* the event is consumed. If the handler returned `true` unconditionally, <kbd>Tab</kbd> would be swallowed even when no suggestion exists — breaking indentation. Returning `false` when idle is what makes the binding transparent. The same pattern applies to <kbd>Escape</kbd>: dismiss when a suggestion is showing, otherwise let it fall through to close panels, clear search, etc.
+
+:::
+
+## Driving suggestions from a backend
+
+A backend (LLM, language server, heuristic) sets the suggestion via the effect. Carry an incrementing `requestId` so responses that arrive out of order are dropped by the field's stale-check:
+
+```ts
+let nextRequestId = 0;
+
+async function requestSuggestion(view: EditorView) {
+  const id = ++nextRequestId;
+  const prefix = view.state.sliceDoc(0, view.state.selection.main.head);
+  const suggestion = await callBackend(prefix); // your async call
+  view.dispatch({
+    effects: setGhostEffect.of({ text: suggestion, requestId: id }),
+  });
+}
+```
+
+Because the field rejects a `setGhostEffect` whose `requestId` is older than the current one, a slow earlier request can never clobber a newer suggestion. This recipe deliberately keeps that logic minimal — the full treatment of cancelling, ignoring, and reconciling overlapping async responses lives in [stale async-response rejection](./stale-response-rejection.mdx).
+
+## Trimming the duplicated prefix (the emoji-correct way)
+
+Backends frequently return a suggestion that *repeats text the user already typed*. If the document ends with `const fo` and the model returns `const foo = 1`, inserting it verbatim yields `const foconst foo = 1`. You want to trim the overlap between the typed prefix and the suggestion's head before inserting.
+
+The subtlety: **you must iterate by code point, not by UTF-16 code unit.** A naive `for (let i = 0; i < str.length; i++)` walks code units, which splits surrogate pairs — emoji like `😀` and many CJK-adjacent characters occupy two code units. Comparing or slicing mid-pair corrupts the string. `Array.from(str)` iterates by code point, keeping each emoji intact:
+
+```ts
+export function trimDuplicatePrefix(
+  prefix: string,
+  suggestion: string,
+  textAfterCursor: string,
+): string | null {
+  if (!suggestion) return null;
+
+  // Array.from iterates by code point — emoji and other astral-plane
+  // characters stay whole instead of being split across surrogate halves.
+  const prefixCPs = Array.from(prefix);
+  const suggestionCPs = Array.from(suggestion);
+  const afterCPs = Array.from(textAfterCursor);
+
+  // Longest tail of the typed prefix that matches the head of the suggestion.
+  let overlapLen = 0;
+  const maxOverlap = Math.min(prefixCPs.length, suggestionCPs.length);
+  outer: for (let k = maxOverlap; k > 0; k--) {
+    for (let i = 0; i < k; i++) {
+      if (prefixCPs[prefixCPs.length - k + i] !== suggestionCPs[i]) {
+        continue outer;
+      }
+    }
+    overlapLen = k;
+    break;
+  }
+
+  const trimmedCPs = suggestionCPs.slice(overlapLen);
+  if (trimmedCPs.length === 0) return null;
+
+  // If what remains merely duplicates the text already after the cursor,
+  // there's nothing useful to insert.
+  if (trimmedCPs.length <= afterCPs.length) {
+    let isPrefix = true;
+    for (let i = 0; i < trimmedCPs.length; i++) {
+      if (trimmedCPs[i] !== afterCPs[i]) {
+        isPrefix = false;
+        break;
+      }
+    }
+    if (isPrefix) return null;
+  }
+
+  return trimmedCPs.join("");
+}
+```
+
+:::warning[Never index a JavaScript string by `.length` for user text]
+
+`"😀".length === 2`. Slicing or comparing a string at a UTF-16 index that lands inside a surrogate pair produces a lone surrogate (`\uD83D`), which renders as `�` and breaks equality checks. Any text-overlap logic over arbitrary user input — prefix trimming, diffing, truncation — should iterate with `Array.from`, a `for...of` loop, or `Intl.Segmenter` (which additionally handles combining marks and grapheme clusters). Code-point iteration is the minimum bar; pick `Intl.Segmenter` if you need grapheme correctness for things like flag emoji or skin-tone modifiers.
+
+:::
+
+## Composing with IME gating and stale-response rejection
+
+This recipe is the meeting point of two other recipes:
+
+- **[IME composition gating](./ime-composition-gating.mdx)** — while the user is composing text via an IME (Japanese, Chinese, Korean, etc.), the ghost widget must be suppressed so it doesn't corrupt the composition or get measured at the wrong caret anchor. That recipe adds a second `composingField` and **derives the decoration from *both* fields** with `EditorView.decorations.compute([ghostTextField, composingField], …)`. The shared "computing decorations from multiple state fields" callout on that page explains why you list every field a decoration reads in the `compute` dependency array — read it there; this page's single-field `compute([field])` is the simplified case before IME gating is layered on.
+- **[Stale async-response rejection](./stale-response-rejection.mdx)** — the `requestId` check sketched above is the minimal version. The full recipe covers cancellation, debouncing, and reconciling responses that race against the user's typing.
+
+Layer all three together and you have the full Copilot-style stack: async suggestions that survive races, suppress correctly during IME composition, render as a caret widget, and accept on a <kbd>Tab</kbd> that stays out of the way when idle.
+
+## Usage
+
+```ts
+import { EditorView, basicSetup } from "codemirror";
+
+const view = new EditorView({
+  doc: "function greet(name) {\n  \n}\n",
+  parent: document.querySelector("#editor")!,
+  extensions: [
+    basicSetup,
+    ghostTextExtension({ acceptKey: "Tab" }),
+  ],
+});
+
+// Later, when your backend returns a completion:
+view.dispatch({
+  effects: setGhostEffect.of({ text: "return `Hello, ${name}!`;", requestId: 1 }),
+});
+```
+
+Press <kbd>Tab</kbd> to accept, <kbd>Escape</kbd> to dismiss, type or move the caret to invalidate — and <kbd>Tab</kbd> still indents normally whenever no suggestion is showing.
