@@ -191,3 +191,215 @@ const extensions = [
 ```ts
 background: "rgba(82, 139, 255, 0.8)",
 ```
+
+## スクロールバーの検索マッチマーカー
+
+関連するテクニックとして、スクロールバートラックに**検索マッチごとに1つのティック**を描画する方法があります。VS Code で検索が有効なときに見られる「マッチのミニマップ」です。このプラグインは別の Extension の `StateField` の**純粋なコンシューマー**です。状態を自分では持たず、フィールドから位置を読み取って DOM ノードを再描画するだけです。
+
+カスタムハイライトレイヤーで `searchHighlightField` を公開している詳細については [Search & Replace](../extensions/search.mdx) を参照してください。
+
+### 別の Extension のフィールドから位置を読み取る
+
+`view.state.field(field, false)` は省略可能なフィールドを安全に読み取る方法です。第2引数に `false` を渡すと、フィールドがマウントされていない場合（テスト中や検索 Extension が含まれていない場合など）にスローする代わりに `undefined` を返します。
+
+```ts
+const set = view.state.field(searchHighlightField, false);
+if (!set) return []; // フィールド未マウント — 何も描画しない
+```
+
+これにより、スクロールバーマーカープラグインは検索 Extension の存在に対してハードな依存を持たずに単独で動作できます。
+
+### 1行に複数のマッチを1つのティックに集約する
+
+ドキュメントの1行には多数の検索ヒットが含まれる場合があります。それぞれに個別のティックを描画するとスクロールバーが煩雑になります。集約の戦略では `lineBlockAt(from).top` を一意なキーとして使用します。同じ視覚的行に2つのマッチが落ちると同じ `top` ピクセルを共有するため、1つのマーカーに集約されます。
+
+```ts
+interface MarkerPos {
+  top: number;
+  active: boolean;
+}
+
+function collectMarkerPositions(view: EditorView): MarkerPos[] {
+  const set = view.state.field(searchHighlightField, false);
+  if (!set) return [];
+
+  const seen = new Map<number, MarkerPos>();
+  const docLength = view.state.doc.length;
+  const cursor = set.iter();
+
+  while (cursor.value !== null) {
+    const from = cursor.from;
+    // ライブドキュメント長を超えるデコレーション範囲は
+    // lineBlockAt 内でスローされます。StateField は tr.changes を通じて
+    // 範囲をマップするため、これは古い位置に対する防御的ガードです。
+    if (from < 0 || from > docLength) {
+      cursor.next();
+      continue;
+    }
+
+    const block = view.lineBlockAt(from);
+    const top = block.top; // コンテンツ上端からのピクセルオフセット — 視覚的行ごとに一意
+    const spec = cursor.value.spec as { class?: string };
+    const active = spec.class === "find-match-active";
+
+    const existing = seen.get(top);
+    if (existing) {
+      // この行のいずれかの範囲がアクティブなヒットであれば、アクティブに昇格させる。
+      if (active) existing.active = true;
+    } else {
+      seen.set(top, { top, active });
+    }
+    cursor.next();
+  }
+
+  return Array.from(seen.values());
+}
+```
+
+基本とアクティブの2段階システムにより、集約後も通常の検索ヒットと現在フォーカスされているヒットの区別が保持されます。
+
+### 再描画トリガーと `viewportChanged` を除外する理由
+
+`update` メソッドが再描画をスケジュールするタイミングを決定します。
+
+```ts
+update(update: ViewUpdate) {
+  const prevField = update.startState.field(searchHighlightField, false);
+  const nextField = update.state.field(searchHighlightField, false);
+  const fieldChanged = prevField !== nextField;
+
+  // 再描画するケース:
+  //   fieldChanged   — 新しいデコレーションセットがディスパッチされた（新しい検索結果）
+  //   docChanged     — ドキュメント編集により tr.changes を通じて位置がリマップされ、
+  //                    フィールド参照が安定していても block.top がシフトする
+  //   geometryChanged — ウィンドウリサイズや行折り返しの切り替えで block.top がシフト
+  //
+  //   viewportChanged は対象外: マーカーはスクロールバートラック上の絶対位置にあり、
+  //   CodeMirror が現在仮想化している行には依存しない。
+  if (fieldChanged || update.docChanged || update.geometryChanged) {
+    this.scheduleRepaint();
+  }
+}
+```
+
+`viewportChanged` はスクロール時に頻繁に発火します。スクロールバーのマーカー位置は `contentHeight` に対する絶対的な `block.top` 値から計算されるため、ユーザーがスクロールしても変化しません。`viewportChanged` で再描画すると、スクロールイベントごとに不要な処理が発生します。
+
+### 完全なプラグイン
+
+```ts
+import { type Extension } from "@codemirror/state";
+import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
+import { searchHighlightField } from "./search-highlight"; // your field
+
+const SCROLLBAR_WIDTH = "14px";
+
+export function searchScrollbarMarkersExtension(): Extension {
+  return ViewPlugin.fromClass(
+    class {
+      private container: HTMLDivElement;
+      private pendingFrame = 0;
+
+      constructor(private view: EditorView) {
+        this.container = document.createElement("div");
+        Object.assign(this.container.style, {
+          position: "absolute",
+          right: "0",
+          top: "0",
+          width: SCROLLBAR_WIDTH,
+          height: "100%",
+          pointerEvents: "none",
+          zIndex: "10",
+        });
+        view.dom.appendChild(this.container);
+        this.scheduleRepaint();
+      }
+
+      update(update: ViewUpdate) {
+        const prevField = update.startState.field(searchHighlightField, false);
+        const nextField = update.state.field(searchHighlightField, false);
+        const fieldChanged = prevField !== nextField;
+        if (fieldChanged || update.docChanged || update.geometryChanged) {
+          this.scheduleRepaint();
+        }
+      }
+
+      private scheduleRepaint(): void {
+        if (this.pendingFrame) cancelAnimationFrame(this.pendingFrame);
+        this.pendingFrame = requestAnimationFrame(() => {
+          this.pendingFrame = 0;
+          this.repaint();
+        });
+      }
+
+      private repaint(): void {
+        const { scrollDOM } = this.view;
+        const { scrollHeight, clientHeight } = scrollDOM;
+
+        if (scrollHeight <= clientHeight || clientHeight === 0) {
+          this.container.replaceChildren();
+          return;
+        }
+
+        const positions = collectMarkerPositions(this.view);
+        if (positions.length === 0) {
+          this.container.replaceChildren();
+          return;
+        }
+
+        // contentHeight — 上のカーソルインジケーターと同じ注意点。
+        const contentH = this.view.contentHeight;
+        if (contentH <= 0) {
+          this.container.replaceChildren();
+          return;
+        }
+
+        const scrollerTop = scrollDOM.offsetTop;
+        const trackHeight = clientHeight;
+
+        const fragment = document.createDocumentFragment();
+        for (const pos of positions) {
+          const ratio = pos.top / contentH;
+          const clamped = Math.max(0, Math.min(1, ratio));
+          const top = scrollerTop + clamped * trackHeight;
+          const marker = document.createElement("div");
+          marker.className = pos.active
+            ? "cm-search-scrollbar-marker cm-search-scrollbar-marker-active"
+            : "cm-search-scrollbar-marker";
+          marker.style.top = `${top}px`;
+          fragment.appendChild(marker);
+        }
+        this.container.replaceChildren(fragment);
+      }
+
+      destroy() {
+        if (this.pendingFrame) cancelAnimationFrame(this.pendingFrame);
+        this.container.remove();
+      }
+    },
+  );
+}
+```
+
+### マーカーの CSS
+
+ティックは細い絶対位置の div です。アクティブなヒットを区別するために別の色を使用します。
+
+```css
+.cm-search-scrollbar-marker {
+  position: absolute;
+  right: 0;
+  width: 14px;
+  height: 2px;
+  background: rgba(255, 200, 0, 0.6);
+}
+
+.cm-search-scrollbar-marker-active {
+  background: rgba(255, 140, 0, 0.9);
+}
+```
+
+<Note>
+
+カーソルインジケーターとマッチマーカーのコンテナは、どちらも `position: absolute` で `view.dom` 内に配置されます。どちらもエディターの右端を対象としているため、視覚的に重なります。どちらが上に表示されるかを制御する必要がある場合は、それぞれに異なる `z-index`（または CSS カスタムプロパティ）を設定してください。
+
+</Note>
