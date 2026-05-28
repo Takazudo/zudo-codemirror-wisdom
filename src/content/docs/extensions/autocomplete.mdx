@@ -1,0 +1,259 @@
+---
+title: Custom CompletionSource
+description: "Building custom autocomplete in CodeMirror 6: context-gated triggering, validFor, section/boost for grouping, and both wiring styles (override and languageData)."
+sidebar_position: 8
+---
+
+## @codemirror/autocomplete
+
+The `@codemirror/autocomplete` package provides the autocomplete infrastructure for CodeMirror 6. You enable it by adding `autocompletion()` as an extension and supplying one or more `CompletionSource` functions that decide when and what to offer.
+
+```ts
+import { autocompletion } from "@codemirror/autocomplete";
+
+const extensions = [autocompletion()];
+```
+
+A `CompletionSource` is a plain function with this signature:
+
+```ts
+type CompletionSource = (
+  context: CompletionContext,
+) => CompletionResult | null | Promise<CompletionResult | null>;
+```
+
+Return `null` to signal "nothing to offer here." Return a `CompletionResult` to supply options.
+
+## Context Gating: Deciding When to Fire
+
+The most common mistake is triggering a completion source at positions where the results make no sense. A well-shaped source inspects its position first and returns `null` immediately when out of context — this is called context gating.
+
+`CompletionContext` gives you two key helpers:
+
+- `context.pos` — the cursor position (a number)
+- `context.state.doc.lineAt(context.pos)` — the `Line` object for the current line
+- `context.matchBefore(regex)` — matches a regex just before the cursor; returns `{ from, to, text }` or `null`
+
+### Example 1 — Tailwind Class Completion
+
+This source fires only when the cursor is inside a `class` or `className` attribute value. It checks the text from the start of the line up to the cursor:
+
+```ts
+import { autocompletion } from "@codemirror/autocomplete";
+import type { CompletionContext, CompletionResult } from "@codemirror/autocomplete";
+import { EditorState } from "@codemirror/state";
+
+function twCompletionSource(context: CompletionContext): CompletionResult | null {
+  const line = context.state.doc.lineAt(context.pos);
+  const textBefore = line.text.slice(0, context.pos - line.from);
+
+  // Gate: only suggest inside class/className attribute values
+  const classAttrMatch = textBefore.match(
+    /(?:class|className)\s*=\s*(?:"[^"]*$|'[^']*$|{`[^`]*$|{'[^']*$)/,
+  );
+  if (!classAttrMatch) return null;
+
+  // Determine the replace range: the partial class name before the cursor
+  const wordMatch = context.matchBefore(/[\w\-/]*/);
+  if (!wordMatch) return null;
+
+  return {
+    from: wordMatch.from,   // replace starts at the beginning of the partial token
+    options: completionOptions,
+    validFor: /^[\w\-/]*$/, // keep filtering while the typed text still matches
+  };
+}
+```
+
+The replace range uses `context.matchBefore(/[\w\-/]*/)`, so `from` is set to the start of the partial class name. The implicit `to` is the cursor position.
+
+### Example 2 — Skill Command Completion
+
+This source fires only when the current line matches a specific command prefix pattern (`@@ /slug`). The replace range is computed differently: instead of `matchBefore`, it finds the `/` character explicitly and sets both `from` and `to`:
+
+```ts
+import type { CompletionContext, CompletionResult, CompletionSource } from "@codemirror/autocomplete";
+
+// The trigger pattern must mirror the submit-side resolver exactly.
+// Previously `(^|\s)@@\s+/…` fired mid-line, where the action handler
+// would never activate — picking a skill then silently did nothing.
+const PREFIX_PATTERN = /^[ \t]*@@ \/[a-z0-9-]*$/;
+
+export function skillAutocomplete(skills: SkillEntry[]): CompletionSource {
+  return (context: CompletionContext): CompletionResult | null => {
+    const line = context.state.doc.lineAt(context.pos);
+    const before = line.text.slice(0, context.pos - line.from);
+
+    // Gate: line must match the command prefix up to cursor
+    if (!PREFIX_PATTERN.test(before)) return null;
+
+    // Replace range: from the leading `/` to the current cursor
+    const slashOffsetInLine = before.lastIndexOf("/");
+    if (slashOffsetInLine < 0) return null;
+    const from = line.from + slashOffsetInLine;
+
+    return {
+      from,
+      to: context.pos,  // explicit `to` since we computed `from` manually
+      options: skills.map((skill) => ({
+        label: "/" + skill.name,
+        detail: skill.mode,
+        info: skill.description,
+        type: "function",
+      })),
+      validFor: /^\/[a-z0-9-]*$/,
+    };
+  };
+}
+```
+
+The two replace-range techniques differ deliberately:
+- **`matchBefore` pattern** (Tailwind): lets CM detect the word boundary for you, which is convenient for word-like tokens.
+- **`lastIndexOf` pattern** (skill): gives precise control when the replace range starts at a known delimiter (`/`) that is not a typical word character.
+
+## validFor: Client-Side Filtering Without Re-Running the Source
+
+The `validFor` field in a `CompletionResult` tells CodeMirror's autocomplete engine whether the existing result is still valid as the user continues typing — without calling your source function again.
+
+```ts
+return {
+  from: wordMatch.from,
+  options: completionOptions,
+  validFor: /^[\w\-/]*$/, // while typed text matches this, reuse the result
+};
+```
+
+When the user types another character:
+
+1. CM checks whether the text between `from` and the new cursor position matches `validFor`.
+2. If yes — the existing option list is re-filtered client-side. Your source is not called.
+3. If no — CM calls your source again to get a fresh result.
+
+Both sources in this guide set `validFor`. For the skill source it is `/^\/[a-z0-9-]*$/`, meaning CM keeps filtering as long as the user is still typing a lowercase slug after the `/`. Once the user types a character that breaks the pattern (a space, for instance), the existing result is discarded.
+
+## section and boost: Grouping and Ranking Options
+
+The `section` and `boost` fields on individual `Completion` objects let you organize the popup and influence ranking.
+
+### section
+
+When options share the same `section` string (or `CompletionSection` object), the autocomplete popup groups them under a heading. Options without a `section` appear in their own group.
+
+### boost
+
+A positive `boost` value moves an option toward the top of its group. The default is `0`. In the Tailwind source, layout classes are given the highest boost:
+
+```ts
+import type { Completion } from "@codemirror/autocomplete";
+
+const completionOptions: Completion[] = twClasses.map((entry) => ({
+  label: entry.label,
+  detail: entry.detail,
+  type: "class",
+  section: entry.section,           // groups under popup headings: "layout", "spacing", …
+  boost: entry.section === "layout"
+    ? 2
+    : entry.section === "spacing"
+      ? 1
+      : 0,                          // layout floats first, spacing second, rest follow
+}));
+```
+
+Build the options array once at module load (outside the source function) so you pay the construction cost only once, not on every keystroke.
+
+## The Lockstep Rule: Keep Trigger Detection and the Action Handler in Sync
+
+<Warning>
+When a completion source gates on a position-based trigger (a regex on `textBefore`, a line number check, a specific delimiter), the trigger pattern must match the pattern used by the **action handler** — the code that runs when the user actually submits or accepts a completion.
+
+In the skill-command source, the trigger was once `(^|\s)@@\s+\/[a-z0-9-]*$`, which matched `@@ /slug` anywhere on a line, including in the middle. The submit-side resolver only activated when `@@` appeared at the start of the line. Result: the autocomplete popup appeared, the user picked a skill name, and **nothing happened** — the action handler never fired because it did not recognize a mid-line trigger.
+
+Narrowing the trigger to `^[ \t]*@@ \/[a-z0-9-]*$` fixed the divergence. Now the popup appears only where the resolver will act.
+
+Any time you change the trigger regex in your `CompletionSource`, audit the corresponding action handler (key binding, submit callback, state field effect) and adjust it to match.
+</Warning>
+
+## Wiring: Two Styles
+
+### Override — Global Source, Replaces All Defaults
+
+Pass your source to `autocompletion({ override: [...] })`. This replaces all other completion sources (including language-provided ones) with exactly the sources you list:
+
+```ts
+import { autocompletion } from "@codemirror/autocomplete";
+
+const extensions = [
+  autocompletion({
+    override: [skillAutocomplete(mySkillRegistry)],
+    activateOnTyping: true,
+  }),
+];
+```
+
+Use `override` when you want full control — for example, an editor that exclusively completes slash commands and should not show any language keywords.
+
+### languageData — Per-Language Source, Composes With Others
+
+Register your source through `EditorState.languageData` with the `autocomplete` key. CodeMirror picks up any sources registered this way for the active language and merges them with other registered sources:
+
+```ts
+import { autocompletion } from "@codemirror/autocomplete";
+import { EditorState } from "@codemirror/state";
+
+export function tailwindCompletion() {
+  return [
+    autocompletion({
+      activateOnTyping: true,
+      maxRenderedOptions: 50,
+    }),
+    EditorState.languageData.of(() => [
+      { autocomplete: twCompletionSource },
+    ]),
+  ];
+}
+```
+
+Use `languageData` when your source is an additive enhancement — for example, Tailwind class completions that should layer on top of whatever language completions are already active. See [Language Support](./language-support.mdx) for more on the `languageData` facet.
+
+## Complete Example
+
+Putting it together — a function that returns both the `autocompletion` extension and the `languageData` registration, ready to be passed to `EditorState.create({ extensions: [...] })`:
+
+```ts
+import { autocompletion } from "@codemirror/autocomplete";
+import type { CompletionContext, CompletionResult, Completion } from "@codemirror/autocomplete";
+import { EditorState } from "@codemirror/state";
+
+// --- Options built once at module load ---
+const fruitOptions: Completion[] = [
+  { label: "apple",      section: "fruit", boost: 1, type: "keyword" },
+  { label: "apricot",    section: "fruit", boost: 0, type: "keyword" },
+  { label: "banana",     section: "fruit", boost: 0, type: "keyword" },
+  { label: "blueberry",  section: "fruit", boost: 0, type: "keyword" },
+];
+
+// --- CompletionSource with context gating ---
+function fruitSource(context: CompletionContext): CompletionResult | null {
+  // Only fire when the line starts with "fruit:"
+  const line = context.state.doc.lineAt(context.pos);
+  const textBefore = line.text.slice(0, context.pos - line.from);
+  if (!textBefore.startsWith("fruit:")) return null;
+
+  const wordMatch = context.matchBefore(/\w*/);
+  if (!wordMatch) return null;
+
+  return {
+    from: wordMatch.from,
+    options: fruitOptions,
+    validFor: /^\w*$/,
+  };
+}
+
+// --- Extension factory ---
+export function fruitCompletion() {
+  return [
+    autocompletion({ activateOnTyping: true }),
+    EditorState.languageData.of(() => [{ autocomplete: fruitSource }]),
+  ];
+}
+```

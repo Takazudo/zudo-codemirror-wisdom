@@ -1,0 +1,261 @@
+---
+title: カスタム CompletionSource
+description: "CodeMirror 6 でオートコンプリートを自作する: コンテキスト判定によるトリガー制御、validFor、section/boost によるグルーピング、2 種類の接続方法 (override と languageData)。"
+sidebar_position: 8
+---
+
+## @codemirror/autocomplete
+
+`@codemirror/autocomplete` パッケージは CodeMirror 6 のオートコンプリート基盤を提供します。`autocompletion()` を拡張として追加し、いつ何を提案するかを決める `CompletionSource` 関数を渡すことで有効になります。
+
+```ts
+import { autocompletion } from "@codemirror/autocomplete";
+
+const extensions = [autocompletion()];
+```
+
+`CompletionSource` は次のシグネチャを持つ関数です。
+
+```ts
+type CompletionSource = (
+  context: CompletionContext,
+) => CompletionResult | null | Promise<CompletionResult | null>;
+```
+
+`null` を返せば「ここでは何も提案しない」という意味になります。`CompletionResult` を返すとオプション一覧が表示されます。
+
+## コンテキスト判定: いつ発火するかを決める
+
+よくある失敗は、意味のない位置でもコンプリーションソースが発火してしまうことです。よく設計されたソースは最初に位置を確認し、コンテキスト外であればすぐ `null` を返します。これを **コンテキスト判定 (context gating)** と呼びます。
+
+`CompletionContext` が提供する主なヘルパーは次のとおりです。
+
+- `context.pos` — カーソル位置 (数値)
+- `context.state.doc.lineAt(context.pos)` — 現在行の `Line` オブジェクト
+- `context.matchBefore(regex)` — カーソル直前で正規表現をマッチさせ、`{ from, to, text }` または `null` を返す
+
+### 例 1 — Tailwind クラス補完
+
+このソースは `class` または `className` 属性値の内側にカーソルがある場合にのみ発火します。行の先頭からカーソルまでのテキストを検査します。
+
+```ts
+import { autocompletion } from "@codemirror/autocomplete";
+import type { CompletionContext, CompletionResult } from "@codemirror/autocomplete";
+import { EditorState } from "@codemirror/state";
+
+function twCompletionSource(context: CompletionContext): CompletionResult | null {
+  const line = context.state.doc.lineAt(context.pos);
+  const textBefore = line.text.slice(0, context.pos - line.from);
+
+  // 判定: class/className 属性値の内側のみ補完する
+  const classAttrMatch = textBefore.match(
+    /(?:class|className)\s*=\s*(?:"[^"]*$|'[^']*$|{`[^`]*$|{'[^']*$)/,
+  );
+  if (!classAttrMatch) return null;
+
+  // 置換範囲: カーソル直前の部分クラス名を検出する
+  const wordMatch = context.matchBefore(/[\w\-/]*/);
+  if (!wordMatch) return null;
+
+  return {
+    from: wordMatch.from,   // 部分トークンの先頭から置換を開始
+    options: completionOptions,
+    validFor: /^[\w\-/]*$/, // この正規表現にマッチする間はフィルタリングを継続
+  };
+}
+```
+
+置換範囲は `context.matchBefore(/[\w\-/]*/)` で決まるため、`from` は部分クラス名の先頭に設定されます。`to` は省略するとカーソル位置になります。
+
+### 例 2 — スキルコマンド補完
+
+このソースは現在行が特定のコマンドプレフィックスパターン (`@@ /slug`) に一致する場合にのみ発火します。置換範囲の計算方法が異なり、`matchBefore` ではなく `/` 文字を直接 `lastIndexOf` で探し、`from` と `to` の両方を明示的に設定します。
+
+```ts
+import type { CompletionContext, CompletionResult, CompletionSource } from "@codemirror/autocomplete";
+
+// トリガーパターンは送信側リゾルバーと完全に一致させなければならない。
+// 以前は `(^|\s)@@\s+/…` を使っていたため行の途中でも発火し、
+// アクションハンドラーが反応しない位置でも補完候補が表示されていた。
+// スキルを選択しても何も起きないというバグを引き起こした。
+const PREFIX_PATTERN = /^[ \t]*@@ \/[a-z0-9-]*$/;
+
+export function skillAutocomplete(skills: SkillEntry[]): CompletionSource {
+  return (context: CompletionContext): CompletionResult | null => {
+    const line = context.state.doc.lineAt(context.pos);
+    const before = line.text.slice(0, context.pos - line.from);
+
+    // 判定: カーソルまでの行がコマンドプレフィックスに一致するか
+    if (!PREFIX_PATTERN.test(before)) return null;
+
+    // 置換範囲: 先頭の `/` からカーソルまで
+    const slashOffsetInLine = before.lastIndexOf("/");
+    if (slashOffsetInLine < 0) return null;
+    const from = line.from + slashOffsetInLine;
+
+    return {
+      from,
+      to: context.pos,  // `from` を手動計算したので `to` も明示的に指定
+      options: skills.map((skill) => ({
+        label: "/" + skill.name,
+        detail: skill.mode,
+        info: skill.description,
+        type: "function",
+      })),
+      validFor: /^\/[a-z0-9-]*$/,
+    };
+  };
+}
+```
+
+2 つの置換範囲の計算方法はそれぞれ異なる意図を持っています。
+
+- **`matchBefore` パターン** (Tailwind): 単語境界を CM に自動検出させる。単語に似たトークンに便利。
+- **`lastIndexOf` パターン** (スキル): 既知の区切り文字 (`/`) を起点に正確に制御する。
+
+## validFor: ソースを再実行せずにクライアント側でフィルタリング
+
+`CompletionResult` の `validFor` フィールドは、ユーザーが追加文字を入力したとき、既存の結果が引き続き有効かどうかをソース関数を再呼び出しせずに判断するための情報です。
+
+```ts
+return {
+  from: wordMatch.from,
+  options: completionOptions,
+  validFor: /^[\w\-/]*$/, // 入力テキストがこのパターンに一致する間は結果を再利用
+};
+```
+
+ユーザーが文字を入力するたびに CM は次の処理を行います。
+
+1. `from` から新しいカーソル位置までのテキストが `validFor` にマッチするか確認する。
+2. マッチする場合 — 既存のオプション一覧をクライアント側で再フィルタリングする。ソース関数は呼び出されない。
+3. マッチしない場合 — ソース関数を再度呼び出して新しい結果を取得する。
+
+両方のソースで `validFor` を設定しています。スキルソースの場合は `/^\/[a-z0-9-]*$/` で、`/` の後に小文字スラッグを入力し続けている間は再フィルタリングが行われます。スペースなどパターンを壊す文字を入力すると既存の結果は破棄されます。
+
+## section と boost: オプションのグルーピングとランキング
+
+個々の `Completion` オブジェクトの `section` と `boost` フィールドにより、ポップアップを整理しランキングに影響を与えられます。
+
+### section
+
+同じ `section` 文字列 (または `CompletionSection` オブジェクト) を持つオプションは、オートコンプリートのポップアップ内で見出し付きのグループとしてまとめられます。`section` が未設定のオプションはそれ自体のグループに入ります。
+
+### boost
+
+正の `boost` 値はオプションをそのグループの上位に移動させます。デフォルト値は `0` です。Tailwind ソースではレイアウト関連のクラスに最も高い boost が設定されています。
+
+```ts
+import type { Completion } from "@codemirror/autocomplete";
+
+const completionOptions: Completion[] = twClasses.map((entry) => ({
+  label: entry.label,
+  detail: entry.detail,
+  type: "class",
+  section: entry.section,           // ポップアップの見出しでグループ化: "layout", "spacing", …
+  boost: entry.section === "layout"
+    ? 2
+    : entry.section === "spacing"
+      ? 1
+      : 0,                          // layout が最上位、spacing が次、以降は通常順
+}));
+```
+
+オプション配列はモジュールロード時に一度だけ構築します (ソース関数の外側で)。これにより、キーストロークごとに構築コストを払わずに済みます。
+
+## ロックステップルール: トリガー検出とアクションハンドラーを同期させる
+
+<Warning>
+コンプリーションソースが位置ベースのトリガー (textBefore への正規表現、行番号チェック、特定の区切り文字) でゲーティングしている場合、そのトリガーパターンは**アクションハンドラー** — ユーザーが実際に補完を確定したときに実行されるコード — が使うパターンと一致していなければなりません。
+
+スキルコマンドソースでは、かつてトリガーに `(^|\s)@@\s+\/[a-z0-9-]*$` を使っていました。このパターンは行の途中にある `@@ /slug` にもマッチしてしまいます。一方、送信側リゾルバーは `@@` が行の先頭にある場合にしか処理しません。結果として、ポップアップは表示されてスキルを選択できるのに、**何も起きない**というバグが発生しました。
+
+トリガーを `^[ \t]*@@ \/[a-z0-9-]*$` に絞り込むことで問題が解消されました。ポップアップはリゾルバーが処理できる位置にのみ表示されるようになりました。
+
+`CompletionSource` のトリガー正規表現を変更する場合は、対応するアクションハンドラー (キーバインド、送信コールバック、ステートフィールドエフェクト) も必ず確認して一致させてください。
+</Warning>
+
+## 接続方法: 2 つのスタイル
+
+### override — グローバルソース、デフォルトをすべて置き換える
+
+`autocompletion({ override: [...] })` にソースを渡します。これはリストに指定したソースだけを使用し、言語が提供する補完を含む他のすべてのソースを置き換えます。
+
+```ts
+import { autocompletion } from "@codemirror/autocomplete";
+
+const extensions = [
+  autocompletion({
+    override: [skillAutocomplete(mySkillRegistry)],
+    activateOnTyping: true,
+  }),
+];
+```
+
+`override` は完全なコントロールが必要な場合に使います。たとえば、スラッシュコマンドだけを補完し言語キーワードを表示しないエディタなどに適しています。
+
+### languageData — 言語ごとのソース、他のソースと合成される
+
+`EditorState.languageData` の `autocomplete` キーを通じてソースを登録します。CodeMirror はアクティブな言語に登録されたすべてのソースを収集して他のソースとマージします。
+
+```ts
+import { autocompletion } from "@codemirror/autocomplete";
+import { EditorState } from "@codemirror/state";
+
+export function tailwindCompletion() {
+  return [
+    autocompletion({
+      activateOnTyping: true,
+      maxRenderedOptions: 50,
+    }),
+    EditorState.languageData.of(() => [
+      { autocomplete: twCompletionSource },
+    ]),
+  ];
+}
+```
+
+`languageData` は、既存の言語補完に追加する形で機能させたい場合に使います。たとえば、すでに有効な言語補完の上に Tailwind クラス補完を重ねるケースがこれにあたります。`languageData` ファセットの詳細については [Language Support](./language-support.mdx) を参照してください。
+
+## 完全な例
+
+これらをまとめると、`autocompletion` 拡張と `languageData` 登録の両方を返す関数ができます。`EditorState.create({ extensions: [...] })` にそのまま渡せます。
+
+```ts
+import { autocompletion } from "@codemirror/autocomplete";
+import type { CompletionContext, CompletionResult, Completion } from "@codemirror/autocomplete";
+import { EditorState } from "@codemirror/state";
+
+// --- モジュールロード時に一度だけオプションを構築 ---
+const fruitOptions: Completion[] = [
+  { label: "apple",      section: "fruit", boost: 1, type: "keyword" },
+  { label: "apricot",    section: "fruit", boost: 0, type: "keyword" },
+  { label: "banana",     section: "fruit", boost: 0, type: "keyword" },
+  { label: "blueberry",  section: "fruit", boost: 0, type: "keyword" },
+];
+
+// --- コンテキスト判定付き CompletionSource ---
+function fruitSource(context: CompletionContext): CompletionResult | null {
+  // "fruit:" で始まる行でのみ発火する
+  const line = context.state.doc.lineAt(context.pos);
+  const textBefore = line.text.slice(0, context.pos - line.from);
+  if (!textBefore.startsWith("fruit:")) return null;
+
+  const wordMatch = context.matchBefore(/\w*/);
+  if (!wordMatch) return null;
+
+  return {
+    from: wordMatch.from,
+    options: fruitOptions,
+    validFor: /^\w*$/,
+  };
+}
+
+// --- 拡張ファクトリー ---
+export function fruitCompletion() {
+  return [
+    autocompletion({ activateOnTyping: true }),
+    EditorState.languageData.of(() => [{ autocomplete: fruitSource }]),
+  ];
+}
+```
