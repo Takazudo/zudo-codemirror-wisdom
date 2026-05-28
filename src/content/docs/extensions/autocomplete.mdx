@@ -108,6 +108,7 @@ export function skillAutocomplete(skills: SkillEntry[]): CompletionSource {
 ```
 
 The two replace-range techniques differ deliberately:
+
 - **`matchBefore` pattern** (Tailwind): lets CM detect the word boundary for you, which is convenient for word-like tokens.
 - **`lastIndexOf` pattern** (skill): gives precise control when the replace range starts at a known delimiter (`/`) that is not a typical word character.
 
@@ -164,6 +165,7 @@ Build the options array once at module load (outside the source function) so you
 ## The Lockstep Rule: Keep Trigger Detection and the Action Handler in Sync
 
 <Warning>
+
 When a completion source gates on a position-based trigger (a regex on `textBefore`, a line number check, a specific delimiter), the trigger pattern must match the pattern used by the **action handler** — the code that runs when the user actually submits or accepts a completion.
 
 In the skill-command source, the trigger was once `(^|\s)@@\s+\/[a-z0-9-]*$`, which matched `@@ /slug` anywhere on a line, including in the middle. The submit-side resolver only activated when `@@` appeared at the start of the line. Result: the autocomplete popup appeared, the user picked a skill name, and **nothing happened** — the action handler never fired because it did not recognize a mid-line trigger.
@@ -171,6 +173,7 @@ In the skill-command source, the trigger was once `(^|\s)@@\s+\/[a-z0-9-]*$`, wh
 Narrowing the trigger to `^[ \t]*@@ \/[a-z0-9-]*$` fixed the divergence. Now the popup appears only where the resolver will act.
 
 Any time you change the trigger regex in your `CompletionSource`, audit the corresponding action handler (key binding, submit callback, state field effect) and adjust it to match.
+
 </Warning>
 
 ## Wiring: Two Styles
