@@ -399,3 +399,8 @@ view.dispatch({
   changes: { from, to, insert: "replacement" },
 });
 ```
+
+## 関連ページ
+
+- [インラインコマンドキャプチャ](../recipes/inline-command-capture.mdx) — `transactionExtender` をスラッシュコマンドのステートマシンとして活用し、`StateEffect` と `StateField` で遷移状態を管理するパターン
+- [古いレスポンスの破棄](../recipes/stale-response-rejection.mdx) — `StateField` に単調増加する `requestId` を格納し、順序が前後した非同期結果を破棄するパターン

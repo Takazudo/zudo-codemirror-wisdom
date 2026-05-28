@@ -1,0 +1,166 @@
+---
+title: 古い非同期レスポンスの拒否
+description: 単調増加する requestId を StateField の値に埋め込み、update() でエフェクトをフィルタリングすることで、順序が入れ替わった古いバックエンドレスポンスを拒否する方法。
+sidebar_position: 15
+---
+
+## 問題: レスポンスは順不同で届く
+
+ネットワークや AI バックエンドと通信する CodeMirror 拡張 — 自動補完、非同期 lint、AI ゴーストテキストなど — はリクエストを送ってレスポンスを待ちます。落とし穴は、**レスポンスがリクエストした順序どおりには届かない**という点です。リクエスト A を送り、ユーザーがさらにタイプしてリクエスト B を送ると、B のレスポンスが A より*先に*届くことがあります。すべてのレスポンスを無条件に適用してしまうと、A の古い結果が B の新しい結果を上書きし、ユーザーがすでに通り過ぎたテキストに対する候補が表示されてしまいます。
+
+順不同の到着はエッジケースではなく、むしろデフォルトの挙動です。エディタは負けた側を拒否しなければなりません。
+
+定番の解決策は、**エディタの状態の中に単調増加するカウンターを持たせる**ことです。すべてのリクエストにはディスパッチ時点のカウンター値がタグ付けされます。レスポンスが返ってきたら、`update()` 関数がそのタグを現在のカウンターと比較し、古いものをすべて破棄します。
+
+## カウンターの置き場所: StateField の値の中
+
+カウンターは React の ref やモジュールスコープの変数ではなく、`StateField` の値の一部として持ちます。エディタの状態の中に置くことで、トランザクションに乗り、信頼できる唯一の情報源となり、エディタの他の部分と決して食い違わなくなります。
+
+```ts
+import { StateField, StateEffect } from "@codemirror/state";
+import type { EditorView } from "@codemirror/view";
+
+// The counter is a field of the value, alongside the payload it guards.
+type SuggestionState = { text: string | null; requestId: number };
+
+// Starting a request bumps the counter; a response carries the id it was
+// issued under, so update() can tell winners from losers.
+const beginRequest = StateEffect.define<null>();
+const setSuggestion = StateEffect.define<SuggestionState>();
+
+const suggestionField = StateField.define<SuggestionState>({
+  create: () => ({ text: null, requestId: 0 }),
+
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(beginRequest)) {
+        // A new request starts: bump the counter so any in-flight response
+        // issued under an older id is now stale and will be rejected below.
+        value = { text: null, requestId: value.requestId + 1 };
+      }
+      if (effect.is(setSuggestion)) {
+        const incoming = effect.value;
+        // Only late SET responses are rejected. A clear (text === null)
+        // always goes through — you must always be able to dismiss.
+        if (incoming.text !== null && incoming.requestId < value.requestId) {
+          return value; // stale response — discard, keep current state
+        }
+        return incoming;
+      }
+    }
+    return value;
+  },
+});
+```
+
+実際に仕事をしている一行はこれです。
+
+```ts
+if (incoming.text !== null && incoming.requestId < value.requestId) return value;
+```
+
+`incoming.requestId < value.requestId` は「このレスポンスは、現在追跡しているリクエストよりも古いリクエストのもとで発行された」という意味です。つまりレースに負けたので捨てられます。
+
+`text !== null` のガードに注目してください。古いものかどうかのチェックは候補を**セットする**ときだけ適用されます。**クリア**（`text === null`）は無条件に通過します。リクエストの順序に関わらず、現在の候補を消す操作は常に効かなければならないからです。
+
+## カウンターを増やすタイミング: 新しいリクエストごと / モード開始時
+
+カウンターは新しいリクエストが始まるたびにインクリメントします。「キャプチャモード」型の拡張（モードに入るとバックエンド呼び出しが始まる）では、開始エフェクトがカウンターを増やします。
+
+```ts
+const enterCaptureEffect = StateEffect.define<{ command: string }>();
+
+const captureField = StateField.define<{ active: boolean; requestId: number }>({
+  create: () => ({ active: false, requestId: 0 }),
+
+  update(value, tr) {
+    let next = value;
+    for (const e of tr.effects) {
+      if (e.is(enterCaptureEffect)) {
+        // Bump on every enter so any in-flight response from a previous
+        // capture is now older than the current requestId, and will be
+        // filtered when it eventually arrives.
+        next = { active: true, requestId: next.requestId + 1 };
+      }
+    }
+    return next;
+  },
+});
+```
+
+## ID を非同期呼び出しに通す
+
+フィルタの一行は、レスポンスが*発行されたときの* id を持ち運ばなければ意味がありません。ディスパッチ時点で現在の `requestId` を状態から読み取り、非同期呼び出しに通し、レスポンスのエフェクトに刻み込みます。
+
+```ts
+async function requestSuggestion(view: EditorView) {
+  // 1. Begin a new request: this bumps the counter in editor state.
+  view.dispatch({ effects: beginRequest.of(null) });
+
+  // 2. Read the id this request now owns (the freshly bumped value).
+  const { requestId } = view.state.field(suggestionField);
+
+  // 3. Thread it through the async call (it does NOT change while awaiting).
+  const text = await backend.complete(view.state.doc.toString());
+
+  // 4. Stamp the response with the id it was issued under.
+  view.dispatch({
+    effects: setSuggestion.of({ text, requestId }),
+  });
+  // update() compares this requestId against the (possibly newer) current
+  // value and rejects it if a newer request has since started.
+}
+```
+
+これでループが閉じます。新しいリクエストが状態のカウンターを増やし、リクエストはその値を捕まえ、レスポンスがそれを持ち帰り、カウンターが先に進んでいれば `update()` がそのレスポンスを拒否します。
+
+## なぜ終了時にカウンターをリセットせず保持するのか
+
+ここが微妙なところです。モードが終了するとき（ユーザーがキャンセルした、候補が消された）、**カウンターを保持してください — ゼロにリセットしてはいけません。**
+
+```ts
+const exitCaptureEffect = StateEffect.define<null>();
+
+// inside update():
+if (e.is(exitCaptureEffect)) {
+  // Preserve requestId so stale responses to the just-exited capture
+  // continue to be filtered. Resetting to 0 reopens the race.
+  next = { ...next, active: false };
+}
+```
+
+終了時にリセットしてしまうと、具体的に次の失敗が起きます。
+
+1. キャプチャ A が開始 → `requestId` を `5` に増やす → `request@5` を発行（遅い）。
+2. ユーザーが A をキャンセル → 終了。**ここでリセットして `0` に戻すと**、カウンターは `0` に逆戻りする。
+3. キャプチャ B が開始 → `0` を `1` に増やす → `request@1` を発行。
+4. A の遅い `response@5` がようやく届く → `update()` は `5 < 1` を判定する → No → **受理され、B を上書きしてしまう。**
+
+**終了時に保持する**なら、カウンターは終了をまたいで `5` のまま残ります。B の開始でそれが `6` に増えます。A の `response@5` が届くと `5 < 6` → 拒否。正しい挙動です。
+
+この保証は**単調性**から生まれます。カウンターは増えるだけです。決して減らないので、後のリクエストはすべて、前のどのリクエストよりも厳密に大きい id を持ちます。そのため古いレスポンスが新しいリクエストを上回ることは決してありません。終了時にリセットすると単調性が崩れ、このパターンが閉じようとしていたまさにそのレースを再び開いてしまいます。
+
+## 対比: React レベルのカウンターは別のレイヤー
+
+[分割ペインのコンテンツ同期](./split-pane-content-sync.mdx)のレシピでも、重なり合う非同期フォーカス変更を単調増加するカウンターで防いでいます — こちらは React の ref に持たれた `focusChangeIdRef` で、各 `await` のあとに手動でチェックし、より新しい変更が始まっていれば中断します。
+
+これは**同じ考え方**（順不同の非同期処理に対する単調なガード）を**別のレイヤー**で行っているものです。
+
+| | React `focusChangeIdRef` | StateField `requestId` |
+|---|---|---|
+| 置き場所 | React の ref、コンポーネントスコープ | エディタの状態の値の中 |
+| チェック方法 | 各 `await` のあと手動で | `update()` の中で宣言的に |
+| 信頼できる情報源 | エディタの外に存在する | エディタ状態の中の唯一の情報源 |
+| ずれのリスク | エディタ状態と食い違う恐れ | トランザクションに乗るためずれない |
+
+非同期処理が React コンポーネントの管理下にある場合（フォーカスの調整、ディスク I/O）は React ref 版を使います。非同期処理がエディタ自身の状態に流れ込む場合（候補、lint、デコレーション）は StateField 版を使います。ガードがトランザクションに乗り、すでに真実を保持している唯一の場所の中に収まるからです。
+
+## まとめ
+
+- **単調増加する `requestId` を StateField の値の中**に、それが守るペイロードと並べて埋め込む。
+- 新しいリクエストごと / モード開始時に**増やす**。
+- 各リクエストにディスパッチ時点の id を**タグ付け**し、非同期呼び出しを通してレスポンスのエフェクトまで持ち回る。
+- `update()` で**フィルタ**する: `if (incoming.text !== null && incoming.requestId < value.requestId) return value;` — 遅れたセットは拒否し、クリアは常に許可する。
+- 終了時はカウンターを**保持**する。決してリセットしない。リセットするとレースが再び開く。
+
+これはネットワークや AI をバックエンドに持つあらゆる拡張にとって、定番の正しさのパターンです。土台となるトランザクションとエフェクトの仕組みについては[トランザクション](../core/transactions.mdx)を参照してください。

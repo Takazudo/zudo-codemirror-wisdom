@@ -1,0 +1,351 @@
+---
+title: エディタ / プレビュー検索同期
+description: 1 つの検索ボックスを CodeMirror エディタと別途レンダリングされた HTML プレビューの両方に効かせる。ドキュメントオフセットとソース行番号をキーにした唯一の正規化済み・順序付きヒットリストを保持し、ある行の K 番目のエディタヒットを K 番目のプレビューマッチに対応づけ、エディタを上位集合・プレビューを部分集合とする契約のもとで next/prev を同期させる。
+sidebar_position: 18
+---
+
+Markdown や MDX のアプリでは、同じソースを 2 つのビューで表示することがよくあります。片側に CodeMirror エディタ、もう片側にライブプレビューです。1 つの検索ボックスは **両方** のビューでマッチをハイライトしナビゲートでき、next/prev でも歩調を合わせる必要があります。1 行に複数のマッチがある場合でも、エディタには存在するがプレビューには対応する可視要素がないマッチがある場合でもです。
+
+このレシピは、その機能を 1 つの考え方を軸に構築します。すなわち、**エディタが正規化済み・順序付きのヒットリストを保持し、プレビューはそれに対する並列インデックスとして扱う** という考え方です。
+
+## スプリットペインのコンテンツ同期との違い
+
+[スプリットペインのコンテンツ同期](./split-pane-content-sync.mdx) は、2 つの **エディタ** ペインに同じドキュメントを表示し、その内容とスクロール位置を同期させます。どちらも CodeMirror であり、同期の単位はテキストとビューポートです。
+
+このレシピは別の問題です。エディタは **1 つ** しかありません。もう一方は **別途レンダリングされた** 成果物 — 2 つ目のエディタではなく、Markdown レンダラが生成した HTML です。同期の単位はテキストやスクロールではなく **検索ヒット** です。同じクエリが両側でマッチした順序付きのハイライト集合を生み出し、「マッチ #3」がエディタとプレビューで同じ概念上の出現を意味しなければなりません。
+
+その違いが設計全体を方向づけます。2 つのドキュメントを差分比較することはできません。プレビューの DOM テキストはソースと文字単位では揃わないからです(Markdown の構文は消え、インライン要素はテキストを複数のノードに分割します)。代わりに、信頼できる情報源(エディタ)に対してヒットを一度だけ計算し、それを位置によってプレビューへ **マッピング** します。
+
+## 正規化済みヒットリスト
+
+エディタのドキュメントが信頼できる情報源なので、まずそれに対してクエリを実行します。ドキュメントを 1 行ずつ走査し、各ヒットに **ドキュメントオフセット**(デコレーションのために CodeMirror が必要とする `from`/`to` の範囲)と **1 始まりのソース行番号**(後でプレビューのアンカーを見つけるために使うキー)をスタンプします。
+
+```ts
+import type { Text as CmText } from "@codemirror/state";
+
+interface EditorHit {
+  /** Half-open character range in the editor document. */
+  from: number;
+  to: number;
+  /** 1-based source line of the hit's `from` offset. */
+  line: number;
+}
+
+function findEditorHits(text: CmText, query: string): EditorHit[] {
+  if (!query) return [];
+  const lowerQuery = query.toLowerCase();
+  const out: EditorHit[] = [];
+
+  for (let lineNum = 1; lineNum <= text.lines; lineNum++) {
+    const line = text.line(lineNum);
+    const haystack = line.text.toLowerCase();
+    let from = 0;
+    while (from <= haystack.length - lowerQuery.length) {
+      const idx = haystack.indexOf(lowerQuery, from);
+      if (idx === -1) break;
+      const absFrom = line.from + idx;
+      out.push({ from: absFrom, to: absFrom + query.length, line: lineNum });
+      from = idx + lowerQuery.length;
+    }
+  }
+  return out;
+}
+```
+
+1 行ずつ走査するのは意図的です。ヒットごとに余計な `text.lineAt()` を呼ばずにソース行番号をついでにスタンプでき、結果は自然とオフセット順(左から右、上から下)に並びます。その順序こそが正規化されたインデックスそのものです。この配列内のヒットの位置が、そのヒットの同一性です。「マッチ #3」は `hits[2]` であり、それ以上でも以下でもありません。
+
+<Note>
+
+文字列全体を走査するのではなく `text.line(n)` で反復することで、行番号が信頼できる値に保たれます。CodeMirror の `Text` はすべての行の開始位置をすでに把握しているため、`line.from + idx` はちょうどそのドキュメントオフセットになります。`\r\n` でずれてしまうような手動の改行カウントは不要です。
+
+</Note>
+
+## ヒットリストからエディタのデコレーションを駆動する
+
+エディタ側は簡単な半分です。各正規化ヒットをハイライト範囲にマッピングし、検索ハイライトのエフェクト経由でディスパッチします(その下層のハイライトレイヤーについては [検索拡張](../extensions/search.mdx) を参照)。アクティブなヒットには追加のフラグを付け、別の見た目でレンダリングできるようにします。
+
+```ts
+import { EditorView } from "@codemirror/view";
+import { setSearchHighlights } from "@takazudo/cm-search-highlight";
+
+function applyEditorDecorations(
+  view: EditorView,
+  hits: EditorHit[],
+  activeIndex: number,
+): void {
+  const ranges = hits.map((hit, i) => ({
+    from: hit.from,
+    to: hit.to,
+    active: i === activeIndex,
+  }));
+  view.dispatch({ effects: setSearchHighlights(ranges) });
+}
+```
+
+要点はこうです。**デコレーションは正規化済みリストの純粋な射影である** ということ。エディタのハイライトを独立に計算することは決してありません。`ranges[i]` は常に `hits[i]` に対応します。アクティブポインタが移動したときは、同じリストから範囲配列全体を再導出し、再ディスパッチします。「ヒット #i とは何か」の出どころは 1 つだけで、エディタとプレビューの両方がそこから読み取ります。
+
+next/prev でエディタをアクティブなマッチへスクロールさせるには、同じトランザクションの中で `scrollIntoView` エフェクトをプッシュします。
+
+```ts
+view.dispatch({
+  effects: [
+    setSearchHighlights(ranges),
+    EditorView.scrollIntoView(hits[activeIndex].from, { y: "center" }),
+  ],
+});
+```
+
+`scrollIntoView` はビューポートを調整するだけで、カーソルや選択範囲は動かしません。そのため検索結果をナビゲートする間もユーザーの編集位置は保たれます。
+
+## 並列インデックスとしてのプレビュー
+
+プレビューはレンダリング済みの HTML であり、ソースではありません。ソース行をその上にマッピングするには、レンダラが手がかりを残しておく必要があります。各ブロックレベル要素にソース行番号(`data-source-line="N"`)をスタンプする remark プラグインが、まさにそのアンカーを提供します。
+
+すべてのブロックがスタンプを持つため、ブロック内にネストされたインライン要素も素朴な `[data-source-line="N"]` クエリにマッチしてしまいます。ある行の **最も内側の** アンカー — 実際にテキストを保持している末端ブロック — を選ぶには、`:not(:has(...))` フィルタを使います。
+
+```ts
+function findInnermostAnchors(
+  container: HTMLElement,
+  line: number,
+): HTMLElement[] {
+  const sel = `[data-source-line="${line}"]:not(:has([data-source-line="${line}"]))`;
+  return Array.from(container.querySelectorAll(sel)).filter(
+    (el): el is HTMLElement => el instanceof HTMLElement,
+  );
+}
+```
+
+マッチしたアンカーの中で、クエリの出現箇所を見つけて `<mark>` 要素で囲みます。決定的な性質は **順序** です。マークは DOM のドキュメント順で取り出され、それはエディタの走査が使った左から右の読み順と同じです。したがってある行について、**K 番目の `<mark>` は その行の K 番目のエディタヒットに対応します**。
+
+これが設計の核心です。プレビューは *並列インデックス* なのです。ソースと文字単位で揃えようとは決してしません。ただ「行ごとに、両側の i 番目の出現は同じ出現である」とだけ表明します。
+
+### 行ごとにヒットとマークを対応づける
+
+エディタヒットがオフセット順、プレビューマークが DOM 位置順に並んでいれば、対応づけは行ごとのカウンタになります。正規化ヒットを順に走査し、それぞれにその行で未使用の次のマークを割り当てます。
+
+```ts
+interface PreviewMark {
+  el: HTMLElement;
+  line: number;
+}
+
+interface CanonicalHit {
+  editor: EditorHit;
+  previewMark: PreviewMark | null;
+}
+
+function pairHitsByLine(
+  editorHits: EditorHit[],
+  marksByLine: Map<number, PreviewMark[]>,
+): CanonicalHit[] {
+  const usedPerLine = new Map<number, number>();
+  const out: CanonicalHit[] = [];
+
+  for (const hit of editorHits) {
+    const used = usedPerLine.get(hit.line) ?? 0;
+    const marks = marksByLine.get(hit.line);
+    const previewMark = marks && used < marks.length ? marks[used] : null;
+    usedPerLine.set(hit.line, used + 1);
+    out.push({ editor: hit, previewMark });
+  }
+  return out;
+}
+```
+
+`usedPerLine` カウンタが、1 行に複数のマッチがあるときでも「K 番目を K 番目に」を成立させる仕組みです。7 行目の最初のエディタヒットは `marks[0]` を取り、2 番目は `marks[1]` を取り、以下同様です。両方の列が同じ読み順に並んでいるため、K 番目同士の対応づけはテキストを比較することなく同じ出現を揃えます。
+
+## 上位集合 / 部分集合の契約
+
+エディタがある行で生成されたマークよりも **多くの** ヒットを持つ場合、対応づけは `previewMark` を `null` で返します。これはエラーではなく、契約です。
+
+> **エディタのハイライトは上位集合であり、プレビューはベストエフォートの部分集合である。**
+
+ヒットはソースには存在するのに、プレビューに対応する可視要素を持たないことがあります。
+
+- マッチがフェンスドコードブロック内にあり、その内容をプレビューが検索可能なインラインテキストとして表に出さない場合。
+- マッチがレンダラに消費される Markdown 構文 — `[label](url)` の中の URL、画像の alt テキスト — に当たる場合。これは実際のソーステキストではあるが、可視のプレビューテキストとしては決して現れません。
+
+ルールはこうです。**`null` のプレビューペアを持つエディタ専用ヒットも、正規化ナビゲーションに参加する**。そのヒットはエディタ上ではハイライトされ、リスト内のインデックスを占め、next/prev でも止まります。プレビュー側はそのインデックスに対してマークすべきものがないだけです。
+
+```ts
+function applyPreviewActiveClass(
+  hits: CanonicalHit[],
+  activeIndex: number,
+): void {
+  hits.forEach((hit, i) => {
+    const mark = hit.previewMark;
+    if (!mark) return; // editor-only hit: nothing to mark, but it still counts
+    mark.el.classList.toggle("find-match-active", i === activeIndex);
+  });
+}
+```
+
+これを堅牢にするのは 2 つの点です。
+
+1. **ナビゲーションは正規化リストを読み、マークは決して読まない。** `next()`/`prev()` は `hits` へのインデックスを進めるため、`null` のプレビューペアがカウントを狂わせたり、止まるべき箇所を飛ばしたりすることはありません。
+2. **アクティブクラスはマークではなくインデックスによって適用される。** ポインタがエディタ専用ヒットに乗ったとき、`applyPreviewActiveClass` はマークを見つけられずプレビュー上では何も表示しません。しかしエディタは依然としてアクティブなハイライトを表示するので、ユーザーは自分がどこにいるか分かります。
+
+<Warning>
+
+ヒットの総数やアクティブな序数をプレビューのマークから導出してはいけません。正規化ヒットではなくマークを数えると、エディタ専用のマッチがナビゲーションから消え、「8 件中 3 件」がいつのまにか「5 件中 3 件」になります。`total` を定義してよいのは正規化リストだけです。
+
+</Warning>
+
+## オーケストレータへの組み込み
+
+小さなステートフルなオブジェクトが各ピースをまとめます。それは正規化リストとアクティブポインタを保持し、検索バー(あるいは任意のコンシューマ)が `search`、`next`、`prev` を呼び、更新を購読します。
+
+```ts
+interface CrossPaneSearch {
+  search(query: string): void;
+  next(): void;
+  prev(): void;
+  stop(): void;
+}
+
+function createCrossPaneSearch(
+  getView: () => EditorView | null,
+  getPreview: () => HTMLElement | null,
+): CrossPaneSearch {
+  let hits: CanonicalHit[] = [];
+  let activeIndex = -1;
+
+  function apply(query: string): void {
+    clearPreviewMarks(getPreview());
+    hits = [];
+    activeIndex = -1;
+
+    const view = getView();
+    if (!query || !view) {
+      applyEditorDecorations(view!, [], -1);
+      return;
+    }
+
+    const editorHits = findEditorHits(view.state.doc, query);
+
+    // Build the per-line mark index from the preview DOM.
+    const preview = getPreview();
+    const marksByLine = new Map<number, PreviewMark[]>();
+    if (preview) {
+      const lines = new Set(editorHits.map((h) => h.line));
+      for (const line of lines) {
+        const marks: PreviewMark[] = [];
+        for (const anchor of findInnermostAnchors(preview, line)) {
+          for (const el of wrapMatches(anchor, query)) {
+            marks.push({ el, line });
+          }
+        }
+        if (marks.length > 0) marksByLine.set(line, marks);
+      }
+    }
+
+    hits = pairHitsByLine(editorHits, marksByLine);
+    activeIndex = hits.length > 0 ? 0 : -1;
+
+    applyEditorDecorations(view, editorHits, activeIndex);
+    applyPreviewActiveClass(hits, activeIndex);
+  }
+
+  function move(delta: 1 | -1): void {
+    if (hits.length === 0) return;
+    activeIndex = (activeIndex + delta + hits.length) % hits.length;
+    const view = getView();
+    if (view) {
+      applyEditorDecorations(view, hits.map((h) => h.editor), activeIndex);
+    }
+    applyPreviewActiveClass(hits, activeIndex);
+  }
+
+  return {
+    search: (q) => apply(q),
+    next: () => move(1),
+    prev: () => move(-1),
+    stop: () => apply(""),
+  };
+}
+```
+
+押さえておきたい流儀がいくつかあります。
+
+- **再適用は明示的な破棄 + 再構築。** すべての `apply()` は、新しいパスを走査する前に、前回のプレビューマークをクリアしディスパッチします。CodeMirror のデコレーション自動マッピングや、プレビューの再レンダリングが後始末してくれることに依存してはいけません。ソースかプレビューが変わったら、破棄して正規化リストをゼロから再計算します。
+- **ポインタはオーケストレータが保持する。** 検索バーは「どのマークがアクティブか」を追跡しません。オーケストレータに移動を依頼し、状態を読み返すだけです。所有者は 1 つ、信頼できる情報源も 1 つです。
+
+<Note>
+
+`remark-source-line` はブロックの **開始** 行だけをスタンプします。複数行にまたがる段落やフェンスドブロックの 2 行目以降にあるヒットには厳密に一致する `[data-source-line]` アンカーがないため、実運用ではそうしたヒットを *包含する* ブロック — `N` 以下で最大のスタンプ済み行 — に解決します。同様に、インライン境界をまたいで見た目上つながる 1 つのマッチ(`fo<strong>ob</strong>ar`)は、論理的には 1 つのマッチですが `<mark>` のセグメントは複数になります。どちらも同じ並列インデックスの考え方の上での洗練であり、上記の核心的な契約は変わりません。
+
+</Note>
+
+## DOM 走査の詳細
+
+アンカー内のマッチを囲む処理が、レンダリング済み DOM を変更する唯一の箇所です。スコープを限定しましょう。マッチしたアンカーの *内側* のテキストノードだけを走査し、プレビュー全体は決して走査しません。`TreeWalker` がテキストノードを集め、その後、出現箇所を後ろから前へ囲むことで、分割していっても先頭側のオフセットが有効なまま保たれます。
+
+```ts
+function wrapMatches(anchor: HTMLElement, query: string): HTMLElement[] {
+  const lowerQuery = query.toLowerCase();
+  const walker = document.createTreeWalker(anchor, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    textNodes.push(n as Text);
+  }
+
+  const marks: HTMLElement[] = [];
+  for (const node of textNodes) {
+    const hay = node.textContent ?? "";
+    const offsets: number[] = [];
+    let from = 0;
+    while (from <= hay.length - lowerQuery.length) {
+      const idx = hay.toLowerCase().indexOf(lowerQuery, from);
+      if (idx === -1) break;
+      offsets.push(idx);
+      from = idx + lowerQuery.length;
+    }
+    // Split last-to-first so earlier offsets stay valid as we mutate.
+    for (let i = offsets.length - 1; i >= 0; i--) {
+      const idx = offsets[i];
+      let target = node.splitText(idx);
+      if (target.length > query.length) target.splitText(query.length);
+      const mark = document.createElement("mark");
+      mark.className = "find-match";
+      mark.textContent = target.textContent;
+      target.parentNode?.replaceChild(mark, target);
+      marks.unshift(mark);
+    }
+  }
+  return marks;
+}
+
+function clearPreviewMarks(container: HTMLElement | null): void {
+  if (!container) return;
+  const marks = container.querySelectorAll("mark.find-match");
+  const parents = new Set<Node>();
+  marks.forEach((mark) => {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    parent.replaceChild(
+      document.createTextNode(mark.textContent ?? ""),
+      mark,
+    );
+    parents.add(parent);
+  });
+  parents.forEach((p) => (p as Element).normalize());
+}
+```
+
+これは支えとなる機構であって、学びどころではありません。学びどころは、これが提供する順序の保証です。マークは DOM のドキュメント順で返り、それはエディタの走査が生成した順序と同じであり、それこそが K 番目同士の対応づけを正しくします。`clearPreviewMarks` は破棄の半分です。囲んだテキストを元に戻し `normalize()` するので、次のパスはきれいなテキストノードから始まります。
+
+## まとめ
+
+| 関心事 | アプローチ |
+|---|---|
+| 信頼できる情報源 | エディタのドキュメント。クエリを一度だけそれに対して実行する。 |
+| 正規化ヒットリスト | オフセット順。各ヒットに `from`/`to` と 1 始まりのソース行番号をスタンプ。 |
+| エディタのハイライト | `setSearchHighlights` を介した正規化リストの純粋な射影。 |
+| プレビューのマッピング | 並列インデックス。ある行の K 番目のエディタヒット ↔ その行の K 番目の `<mark>`。 |
+| ソース行 → プレビュー | `[data-source-line="N"]:not(:has([data-source-line="N"]))` の最内アンカー。 |
+| エディタ専用ヒット | `null` のプレビューペア。それでもハイライトされナビゲートされる。 |
+| ヒット数 / 序数 | 常に正規化リストから。プレビューのマークからは決して数えない。 |
+| ナビゲーション | ポインタはオーケストレータが保持。コンシューマは `next`/`prev` を呼ぶ。 |
+| 再適用 | 明示的な破棄 + 再構築。自動マッピングに依存しない。 |
+
+対照的なケース — 2 つのエディタペイン間でドキュメントとスクロールを同期する場合 — については [スプリットペインのコンテンツ同期](./split-pane-content-sync.mdx) を、エディタ側がディスパッチする下層のハイライトレイヤーについては [検索拡張](../extensions/search.mdx) を参照してください。

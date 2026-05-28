@@ -1,0 +1,314 @@
+---
+title: AI ゴーストテキスト補完
+description: CodeMirror 6 で Copilot 風のインライン AI 補完 UI を構築する — キャレット位置のウィジェット、候補がある時だけ受け入れて待機中は素通りする Tab キー、そして編集時・移動時のクリアルール。
+sidebar_position: 16
+---
+
+このレシピでは **Copilot 風のインライン AI 補完** の完全な設計図を作ります。バックエンドが候補を生成し、エディターはそれをキャレットのすぐ後ろに薄い「ゴーストテキスト」として表示し、ユーザーは <kbd>Tab</kbd> で受け入れます。`@codemirror/autocomplete`（ポップアップリストを表示する）とは異なり、ゴーストテキストは通常のタイピングと共存しなければならないインラインオーバーレイです。難しいのはすべてライフサイクルの部分にあります。
+
+これは既存の Extension のラッパーではなく、純粋にカスタムな Extension です。きちんと作り込むべき仕組みは次の 4 つです。
+
+1. 候補を **キャレット位置のウィジェット** として描画する（`side: 1`、`aria-hidden`、`ignoreEvent()`）。
+2. 候補がない時には **素通りする受け入れキー**（`false` を返す `Prec.highest` キーマップ）。
+3. 受け入れ用のトランザクションに **アノテーション** を付け、候補が即座に自己クリアされないようにする。
+4. 候補が間違った位置に残らないようにする **移動時クリア・編集時クリア** のルール。
+
+## 状態の形
+
+候補は `StateField` に保持します。候補テキストと並んで `requestId` も持たせることで、遅延した／古いバックエンド応答を拒否できます（完全なパターンは [stale async-response rejection](./stale-response-rejection.mdx) を参照）。
+
+```ts
+import {
+  Annotation,
+  Prec,
+  RangeSet,
+  StateEffect,
+  StateField,
+  type Extension,
+} from "@codemirror/state";
+import {
+  Decoration,
+  EditorView,
+  WidgetType,
+  keymap,
+  type DecorationSet,
+} from "@codemirror/view";
+
+type GhostTextState = { text: string | null; requestId: number };
+
+// Set or clear the suggestion. requestId lets us drop stale responses.
+const setGhostEffect = StateEffect.define<GhostTextState>();
+
+// Marks the accept transaction so the auto-clear rule ignores it.
+const ghostAcceptAnnotation = Annotation.define<true>();
+```
+
+## キャレットウィジェット
+
+候補はカーソル head に配置した `WidgetType` で描画します。重要なポイントは 3 つです。
+
+```ts
+class GhostTextWidget extends WidgetType {
+  constructor(readonly text: string) {
+    super();
+  }
+
+  // Reuse the DOM node when the text is unchanged — avoids flicker.
+  eq(other: GhostTextWidget): boolean {
+    return this.text === other.text;
+  }
+
+  toDOM(): HTMLElement {
+    const span = document.createElement("span");
+    span.className = "cm-ghost-text";
+    // The suggestion is not part of the document — keep it out of the
+    // accessibility tree so screen readers don't announce phantom text.
+    span.setAttribute("aria-hidden", "true");
+    span.textContent = this.text;
+    return span;
+  }
+
+  // Clicks/selection inside the widget must not be treated as editor input.
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+```
+
+- **`side: 1`**（下記でデコレーションを生成する箇所で指定）はウィジェットをキャレット位置の*後ろ*に配置し、実際のカーソルが視覚的にゴーストテキストより前に残るようにします。
+- **`aria-hidden="true"`** は、まだドキュメントの内容ではない未受け入れの候補をアクセシビリティツリーから除外します。
+- **`ignoreEvent()` が `true` を返す** ことで、ウィジェット内のポインター／選択イベントがドキュメントへの編集として解釈されるのを防ぎます。
+
+薄いインラインテキストとしてスタイリングします。
+
+```css
+.cm-ghost-text {
+  opacity: 0.4;
+  pointer-events: none;
+}
+```
+
+## ステートフィールドと 2 つのクリアルール
+
+フィールドの `update` こそがライフサイクルの本体です。上から順に読んでください。
+
+```ts
+const ghostTextField = StateField.define<GhostTextState>({
+  create: () => ({ text: null, requestId: 0 }),
+
+  update(value, tr) {
+    // 1. An explicit set/clear effect always wins.
+    for (const effect of tr.effects) {
+      if (effect.is(setGhostEffect)) {
+        const next = effect.value;
+        // Drop a stale backend response (older requestId) when *setting*.
+        if (next.text !== null && next.requestId < value.requestId) {
+          return value;
+        }
+        return next;
+      }
+    }
+
+    // 2. CLEAR-ON-MOVE: cursor moved without typing → drop the suggestion,
+    //    otherwise the widget would render at the old, now-wrong position.
+    if (tr.selection && !tr.docChanged) {
+      return { text: null, requestId: value.requestId };
+    }
+
+    // 3. CLEAR-ON-EDIT: any document change that is NOT the accept insertion
+    //    invalidates the suggestion. The annotation is how we tell them apart.
+    if (tr.docChanged && !tr.annotation(ghostAcceptAnnotation)) {
+      return { text: null, requestId: value.requestId };
+    }
+
+    return value;
+  },
+
+  // Derive the decoration from the field (see the multi-field note below).
+  provide: (field) =>
+    EditorView.decorations.compute([field], (state): DecorationSet => {
+      const { text } = state.field(field);
+      if (!text) return Decoration.none;
+      const head = state.selection.main.head;
+      return RangeSet.of([
+        Decoration.widget({
+          widget: new GhostTextWidget(text),
+          side: 1,
+        }).range(head),
+      ]);
+    }),
+});
+```
+
+2 つのクリアルールがこのレシピの核心です。
+
+- **移動時クリア**（`tr.selection && !tr.docChanged`）: ユーザーが別の場所をクリックした、または矢印キーで離れた場合です。候補は元のキャレット位置に対して計算されたものなので、もはや有効ではありません。
+- **編集時クリア**（`tr.docChanged && !tr.annotation(...)`）: ユーザーが何かを入力した場合です。入力した内容は候補と食い違うので破棄しなければなりません。*ただし*、その変更自体が受け入れの挿入である場合は別で、まさにそれをアノテーションが守ります。
+
+:::note[受け入れアノテーションが不可欠な理由]
+
+候補の受け入れもまたドキュメントの変更です。`ghostAcceptAnnotation` タグがなければ、クリアルール #3 が受け入れトランザクションで発火し、候補を挿入するのと同じ dispatch の中でそれを消してしまいます。テキスト自体には無害ですが、これでは受け入れたばかりの候補を*読み取る*ロジックを実行できなくなります。受け入れトランザクションにタグを付けることで、フィールドは「ユーザーが入力した」と「自分たちが候補を挿入した」を区別できます。
+
+:::
+
+## 素通りする受け入れキー
+
+受け入れキー（通常は <kbd>Tab</kbd>）はこのレシピ全体で最も扱いの難しいバインディングです。<kbd>Tab</kbd> はエディター内ですでに有用な働きをしています（インデント、フォーカス移動、オートコンプリートの受け入れ）。私たちが望むのは、**候補がある時だけ** ゴーストテキストを受け入れ、それ以外の場合は私たちの Extension が存在しないかのように振る舞わせることです。
+
+その秘訣は、**受け入れるものがない時に `false` を返す** `Prec.highest` キーマップです。CodeMirror では、キーハンドラーが `false` を返すと「処理しなかった」という意味になり、イベントは優先順位に従って次のハンドラーへ素通りします。したがって私たちのハンドラーは <kbd>Tab</kbd> を最初に（最高優先度で）受け取り、それを消費する（候補あり → `return true`）か、脇に退く（`return false`）かのどちらかになります。
+
+```ts
+function ghostTextExtension(options: { acceptKey: string }): Extension {
+  return [
+    ghostTextField,
+    Prec.highest(
+      keymap.of([
+        {
+          key: options.acceptKey, // e.g. "Tab"
+          run(view) {
+            const { text, requestId } = view.state.field(ghostTextField);
+            // No suggestion → fall through to normal Tab behavior.
+            if (!text) return false;
+
+            const { head } = view.state.selection.main;
+            view.dispatch({
+              changes: { from: head, insert: text },
+              selection: { anchor: head + text.length },
+              effects: setGhostEffect.of({ text: null, requestId }),
+              // Tell the field's clear rule this change is the accept.
+              annotations: ghostAcceptAnnotation.of(true),
+            });
+            return true; // consumed
+          },
+        },
+        {
+          key: "Escape",
+          run(view) {
+            const { text, requestId } = view.state.field(ghostTextField);
+            if (!text) return false; // nothing to dismiss → fall through
+            view.dispatch({
+              effects: setGhostEffect.of({ text: null, requestId }),
+            });
+            return true;
+          },
+        },
+      ]),
+    ),
+  ];
+}
+```
+
+:::tip[`return false` こそが肝心]
+
+`Prec.highest` が制御するのは*順序*だけで、イベントを消費するかどうかではありません。ハンドラーが無条件に `true` を返したら、候補が存在しない時でも <kbd>Tab</kbd> が飲み込まれ、インデントが壊れてしまいます。待機中に `false` を返すことが、このバインディングを透過的にしているのです。同じパターンは <kbd>Escape</kbd> にも当てはまります。候補が表示されている時は破棄し、そうでなければパネルを閉じる・検索をクリアするなどの動作へ素通りさせます。
+
+:::
+
+## バックエンドから候補を駆動する
+
+バックエンド（LLM、Language Server、ヒューリスティック）はエフェクト経由で候補を設定します。インクリメントされる `requestId` を持たせ、順序が前後して到着した応答はフィールドの古さチェックで破棄されるようにします。
+
+```ts
+let nextRequestId = 0;
+
+async function requestSuggestion(view: EditorView) {
+  const id = ++nextRequestId;
+  const prefix = view.state.sliceDoc(0, view.state.selection.main.head);
+  const suggestion = await callBackend(prefix); // your async call
+  view.dispatch({
+    effects: setGhostEffect.of({ text: suggestion, requestId: id }),
+  });
+}
+```
+
+フィールドは現在より古い `requestId` を持つ `setGhostEffect` を拒否するので、遅れて届いた古いリクエストが新しい候補を上書きすることは決してありません。このレシピではそのロジックを意図的に最小限に留めています。重複する非同期応答のキャンセル・無視・調整の完全な扱いは [stale async-response rejection](./stale-response-rejection.mdx) にあります。
+
+## 重複した接頭辞をトリミングする（絵文字に正しい方法）
+
+バックエンドは*ユーザーがすでに入力したテキストを繰り返す*候補を返してくることがよくあります。ドキュメントの末尾が `const fo` で、モデルが `const foo = 1` を返すと、そのまま挿入すると `const foconst foo = 1` になってしまいます。挿入する前に、入力済みの接頭辞と候補の先頭との重なりをトリミングしたいところです。
+
+ここに微妙な点があります。**UTF-16 コードユニット単位ではなく、コードポイント単位で反復しなければなりません。** 素朴な `for (let i = 0; i < str.length; i++)` はコードユニットを辿るため、サロゲートペアを分断します。`😀` のような絵文字や CJK に隣接する多くの文字は 2 コードユニットを占有します。ペアの途中で比較・スライスすると文字列が壊れます。`Array.from(str)` はコードポイント単位で反復し、各絵文字を壊さず保ちます。
+
+```ts
+export function trimDuplicatePrefix(
+  prefix: string,
+  suggestion: string,
+  textAfterCursor: string,
+): string | null {
+  if (!suggestion) return null;
+
+  // Array.from iterates by code point — emoji and other astral-plane
+  // characters stay whole instead of being split across surrogate halves.
+  const prefixCPs = Array.from(prefix);
+  const suggestionCPs = Array.from(suggestion);
+  const afterCPs = Array.from(textAfterCursor);
+
+  // Longest tail of the typed prefix that matches the head of the suggestion.
+  let overlapLen = 0;
+  const maxOverlap = Math.min(prefixCPs.length, suggestionCPs.length);
+  outer: for (let k = maxOverlap; k > 0; k--) {
+    for (let i = 0; i < k; i++) {
+      if (prefixCPs[prefixCPs.length - k + i] !== suggestionCPs[i]) {
+        continue outer;
+      }
+    }
+    overlapLen = k;
+    break;
+  }
+
+  const trimmedCPs = suggestionCPs.slice(overlapLen);
+  if (trimmedCPs.length === 0) return null;
+
+  // If what remains merely duplicates the text already after the cursor,
+  // there's nothing useful to insert.
+  if (trimmedCPs.length <= afterCPs.length) {
+    let isPrefix = true;
+    for (let i = 0; i < trimmedCPs.length; i++) {
+      if (trimmedCPs[i] !== afterCPs[i]) {
+        isPrefix = false;
+        break;
+      }
+    }
+    if (isPrefix) return null;
+  }
+
+  return trimmedCPs.join("");
+}
+```
+
+:::warning[ユーザーテキストを `.length` のインデックスで扱ってはいけない]
+
+`"😀".length === 2` です。サロゲートペアの内側に当たる UTF-16 インデックスで文字列をスライス・比較すると、孤立サロゲート（`\uD83D`）が生じます。これは `�` として表示され、等価判定を壊します。任意のユーザー入力に対するテキストの重なりロジック — 接頭辞トリミング、差分、切り詰め — はすべて `Array.from`、`for...of` ループ、または `Intl.Segmenter`（こちらは結合文字や書記素クラスタも扱います）で反復すべきです。コードポイント単位の反復は最低ラインです。旗の絵文字や肌の色の修飾子などで書記素単位の正しさが必要なら `Intl.Segmenter` を選んでください。
+
+:::
+
+## IME ゲーティングおよび stale-response rejection との合成
+
+このレシピは他の 2 つのレシピが交わる地点です。
+
+- **[IME composition gating](./ime-composition-gating.mdx)** — ユーザーが IME（日本語・中国語・韓国語など）でテキストを変換している間は、ゴーストウィジェットを抑制して変換を壊したり、間違ったキャレットアンカーで測定されたりしないようにしなければなりません。そのレシピでは 2 つ目の `composingField` を追加し、`EditorView.decorations.compute([ghostTextField, composingField], …)` で **両方のフィールドからデコレーションを導出** します。そのページにある「複数のステートフィールドからデコレーションを計算する」という共有の解説は、デコレーションが読み取るすべてのフィールドを `compute` の依存配列に列挙する理由を説明しています。詳しくはそちらを読んでください。このページの単一フィールドの `compute([field])` は、IME ゲーティングを重ねる前の簡略版です。
+- **[Stale async-response rejection](./stale-response-rejection.mdx)** — 上でスケッチした `requestId` チェックは最小版です。完全なレシピでは、キャンセル、デバウンス、そしてユーザーのタイピングと競合する応答の調整を扱います。
+
+この 3 つを重ねれば Copilot 風スタックの全体が完成します。競合状態を生き延びる非同期候補、IME 変換中の正しい抑制、キャレットウィジェットとしての描画、そして待機中は邪魔をしない <kbd>Tab</kbd> での受け入れです。
+
+## 使い方
+
+```ts
+import { EditorView, basicSetup } from "codemirror";
+
+const view = new EditorView({
+  doc: "function greet(name) {\n  \n}\n",
+  parent: document.querySelector("#editor")!,
+  extensions: [
+    basicSetup,
+    ghostTextExtension({ acceptKey: "Tab" }),
+  ],
+});
+
+// Later, when your backend returns a completion:
+view.dispatch({
+  effects: setGhostEffect.of({ text: "return `Hello, ${name}!`;", requestId: 1 }),
+});
+```
+
+<kbd>Tab</kbd> で受け入れ、<kbd>Escape</kbd> で破棄、入力やキャレット移動で無効化します。そして候補が表示されていない時はいつでも <kbd>Tab</kbd> は通常どおりインデントします。

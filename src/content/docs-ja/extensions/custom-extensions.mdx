@@ -320,3 +320,11 @@ function markdownListIndent() {
 - 番号付きリストのマーカーを自動的にインクリメントする（`1.` が `2.` になる）
 - タスクリストのチェックボックス構文（`- [ ]`）を保持する
 - 現在のアイテムにコンテンツがない場合（空の `- ` 行で Enter を押した場合）、リストマーカーを削除する
+
+## 関連ページ
+
+このページで解説したプリミティブを応用した上級レシピです。
+
+- [IME コンポジションゲーティング](../recipes/ime-composition-gating.mdx) — IME 入力中に `ViewPlugin` と `StateField` を組み合わせて Decoration をブロックするパターン
+- [ゴーストテキスト補完](../recipes/ghost-text-completion.mdx) — `decorations.compute()` を使った `StateField` 駆動のインラインサジェストウィジェット
+- [インラインコマンドキャプチャ](../recipes/inline-command-capture.mdx) — `StateEffect` と `StateField` でスラッシュコマンドステートマシンを実装する `transactionExtender` の活用

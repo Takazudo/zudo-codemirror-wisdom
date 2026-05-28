@@ -360,3 +360,7 @@ view.destroy();
 This removes the editor DOM, detaches event listeners, and calls `destroy()` on all view plugins. After calling `destroy()`, the view should not be used.
 
 If you are working in a framework like React or Vue, call `destroy()` in the component's cleanup phase (e.g., `useEffect` cleanup or `onUnmounted`).
+
+## See Also
+
+- [IME Composition Gating](../recipes/ime-composition-gating.mdx) — a practical use of `view.measure()` flushing to coordinate decorations with the browser's IME composition lifecycle

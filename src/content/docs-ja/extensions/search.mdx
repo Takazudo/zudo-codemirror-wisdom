@@ -271,3 +271,156 @@ const view = new EditorView({
     });
   `}
 />
+
+## カスタムハイライトレイヤー
+
+検索ロジックが CodeMirror の外部に存在する場合があります。例えば、エディタペインとプレビューペインで検索バーを共有する場合や、カスタムマッチャー（ファジー検索、AST を考慮した検索など）が独立して動作し、ドキュメントのオフセットを返す場合です。そのような場合、`@codemirror/search` は不要で、代わりに事前計算済みの範囲を受け取る薄いデコレーションレイヤーが欲しくなります。
+
+パターンは `StateField<DecorationSet>` と単一の `StateEffect` の組み合わせで、1 つのトランザクションでハイライトセット全体を置換します。フィールドの `update()` 関数は 2 つの独立した処理を担います。
+
+1. **編集を通じたマッピング** — ユーザーが文字を入力すると、`tr.changes` によって既存のデコレーションが新しい位置に再マップされ、検索ディスパッチの間もハイライトがテキストに追従し続けます。
+2. **エフェクト発生時の置換** — オーケストレーターが新しい結果を持つと、`setSearchHighlightsEffect` に範囲の完全なリストを乗せてディスパッチし、フィールドはセット全体を一括で置換します。
+
+### エフェクトとマークデコレーションの定義
+
+```ts
+import { StateEffect } from "@codemirror/state";
+import { Decoration } from "@codemirror/view";
+
+export interface SearchHighlightRange {
+  from: number;
+  to: number;
+  active: boolean; // true => the navigation target (one per dispatch)
+}
+
+// Single-shot replace: the whole set is swapped each time.
+// No incremental "add one hit" effect — the caller owns the canonical list.
+export const setSearchHighlightsEffect =
+  StateEffect.define<SearchHighlightRange[]>();
+
+// Two-tier marks: active hit gets a distinct class for styling.
+const findMatchDeco = Decoration.mark({ class: "find-match" });
+const findMatchActiveDeco = Decoration.mark({ class: "find-match-active" });
+```
+
+### デコレーションセットを防御的に構築する
+
+`Decoration.set` は入力が `from` 位置でソートされていることを要求し、長さゼロや反転した範囲を拒否します。呼び出し側の不備で不変条件を違反しないよう、防御的にソートとフィルタリングを行います。
+
+```ts
+import { Decoration } from "@codemirror/view";
+import type { DecorationSet } from "@codemirror/view";
+
+function buildDecorations(
+  ranges: readonly SearchHighlightRange[],
+  docLength: number,
+): DecorationSet {
+  if (ranges.length === 0) return Decoration.none;
+
+  const sorted = ranges
+    // Drop zero-length ranges (Decoration.mark requires from < to) and
+    // out-of-bounds ranges (defensive guard for upstream regex edge cases).
+    .filter((r) => r.from < r.to && r.from >= 0 && r.to <= docLength)
+    .slice()
+    .sort((a, b) => a.from - b.from || a.to - b.to);
+
+  if (sorted.length === 0) return Decoration.none;
+
+  return Decoration.set(
+    sorted.map((r) =>
+      (r.active ? findMatchActiveDeco : findMatchDeco).range(r.from, r.to),
+    ),
+  );
+}
+```
+
+### ステートフィールド
+
+`update()` 関数は、エフェクトを確認する前に既存のデコレーションを `tr.changes` でマップします。この順序が重要です。エフェクトが新しい範囲を持つ場合、編集が適用された後のドキュメント長に対して検証されます。
+
+```ts
+import { StateField } from "@codemirror/state";
+import { Decoration, EditorView } from "@codemirror/view";
+import type { DecorationSet } from "@codemirror/view";
+
+export const searchHighlightField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+
+  update(value, tr) {
+    let next = value;
+
+    // Step 1: remap through edits so marks stay glued to text between dispatches.
+    // Without this, a character insertion before a highlight would leave the mark
+    // pointing at the wrong offset until the next search dispatch.
+    if (tr.docChanged) {
+      next = next.map(tr.changes);
+    }
+
+    // Step 2: if new ranges arrived, replace the entire set.
+    for (const e of tr.effects) {
+      if (e.is(setSearchHighlightsEffect)) {
+        next = buildDecorations(e.value, tr.state.doc.length);
+      }
+    }
+
+    return next;
+  },
+
+  // Wire the DecorationSet into the view's decoration layer.
+  provide: (field) => EditorView.decorations.from(field),
+});
+```
+
+### CodeMirror 外部から範囲をプッシュする
+
+フィールドを Extension として登録し、`view.dispatch` で範囲をプッシュします。
+
+```ts
+import { EditorView, basicSetup } from "codemirror";
+
+const view = new EditorView({
+  doc: "The quick brown fox jumps over the lazy dog.",
+  extensions: [basicSetup, searchHighlightField],
+  parent: document.getElementById("editor"),
+});
+
+// Called by your external search orchestrator whenever hits change.
+function applyHighlights(ranges: SearchHighlightRange[]) {
+  view.dispatch({
+    effects: setSearchHighlightsEffect.of(ranges),
+  });
+}
+
+// Example: highlight "fox" (basic) and "dog" (active / navigation target).
+applyHighlights([
+  { from: 16, to: 19, active: false }, // "fox"
+  { from: 40, to: 43, active: true },  // "dog" — the active navigation hit
+]);
+
+// Clear all highlights by dispatching an empty array.
+applyHighlights([]);
+```
+
+### 2 段階のための CSS
+
+マーククラスにスタイルが必要です。エディタのスタイルシートか `EditorView.theme` に追加します。
+
+```ts
+import { EditorView } from "@codemirror/view";
+
+const highlightTheme = EditorView.theme({
+  ".find-match": {
+    backgroundColor: "#ffd54f80",
+    borderRadius: "2px",
+  },
+  ".find-match-active": {
+    backgroundColor: "#ff980080",
+    outline: "1px solid #e65100",
+    borderRadius: "2px",
+  },
+});
+```
+
+:::note[@codemirror/search を使わない理由]
+`@codemirror/search` は CM 内部に独自の検索状態を持ち、独自のクエリを実行します。カスタムマッチャーを使う場合や、複数のペインをまたいで単一の検索を行う必要がある場合は、このような薄いカスタムフィールドが適切です。このフィールドは範囲を保持してリマップするだけで、何が一致するかを決めるオーケストレーターが唯一の信頼できる情報源であり続けます。
+:::

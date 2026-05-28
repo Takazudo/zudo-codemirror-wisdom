@@ -245,3 +245,7 @@ if (!readOnly && !suppressAutoFocus) view.focus();
 | エディタの高さが0 | `display: contents` が高さチェーンを壊す | 適切なflex親を持つ `absolute inset-0` ラッパー |
 | ペーストツールチップ（WKWebView） | focusinでの `clipboard.readText()` | windowフォーカスでのみクリップボード同期 |
 | 自動フォーカスの競合 | 複数エディタが `view.focus()` を呼ぶ | `suppressAutoFocus` prop、ペイン取得時に明示的フォーカス |
+
+## 関連ページ
+
+- [エディタ + プレビュー検索同期](./editor-preview-search-sync.mdx) — 分割ペインパターンを発展させ、エディタペインとレンダリング済みプレビューペイン間でヒットインデックスを同期するパターン

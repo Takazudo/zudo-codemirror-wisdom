@@ -360,3 +360,7 @@ view.destroy();
 これにより、エディタの DOM が削除され、イベントリスナーがデタッチされ、すべての ViewPlugin の `destroy()` が呼び出されます。`destroy()` を呼び出した後は、View を使用しないでください。
 
 React や Vue などのフレームワークで作業している場合は、コンポーネントのクリーンアップフェーズ（例: `useEffect` のクリーンアップや `onUnmounted`）で `destroy()` を呼び出してください。
+
+## 関連ページ
+
+- [IME コンポジションゲーティング](../recipes/ime-composition-gating.mdx) — ブラウザの IME コンポジションライフサイクルに合わせて Decoration を調整する `view.measure()` フラッシュの実践的な活用例
