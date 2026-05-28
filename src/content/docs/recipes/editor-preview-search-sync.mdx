@@ -1,0 +1,351 @@
+---
+title: Editor / Preview Search Sync
+description: Drive a single Find box across a CodeMirror editor and a separately-rendered HTML preview. Own one canonical, ordered hit list keyed by document offset plus source line, pair the K-th editor hit on a line to the K-th preview match, and keep next/prev in lockstep with an editor-superset, preview-subset contract.
+sidebar_position: 18
+---
+
+Markdown and MDX apps often show two views of the same source: the CodeMirror editor on one side, a live HTML preview on the other. A single Find box should highlight and navigate matches in **both** views, staying in lockstep on next/prev — even when a line contains several matches, and even when a match exists in the editor but has no visible counterpart in the preview.
+
+This recipe builds that feature around one idea: **the editor owns a canonical, ordered hit list, and the preview is treated as a parallel index against it.**
+
+## How this differs from split-pane content sync
+
+[Split Pane Content Sync](./split-pane-content-sync.mdx) keeps two **editor** panes showing the same document, syncing their content and scroll position. Both sides are CodeMirror; the unit of sync is text and viewport.
+
+This recipe is a different problem. There is only **one** editor. The other side is a **separately-rendered** artifact — HTML produced by a Markdown renderer, not a second editor. The unit of sync is not text or scroll but **search hits**: the same query must produce a matched, ordered set of highlights on both sides, and "match #3" must mean the same conceptual occurrence in the editor and in the preview.
+
+That difference drives the whole design. You cannot diff two documents — the preview's DOM text does not line up character-for-character with the source (Markdown syntax disappears, inline elements split text across nodes). Instead you compute hits once against the source of truth (the editor) and **map** them onto the preview by position.
+
+## The canonical hit list
+
+The editor's document is the source of truth, so run the query against it first. Walk the document line by line and stamp each hit with its **document offset** (the `from`/`to` range CodeMirror needs for decorations) and its **1-based source line** (the key you will later use to find the preview anchor).
+
+```ts
+import type { Text as CmText } from "@codemirror/state";
+
+interface EditorHit {
+  /** Half-open character range in the editor document. */
+  from: number;
+  to: number;
+  /** 1-based source line of the hit's `from` offset. */
+  line: number;
+}
+
+function findEditorHits(text: CmText, query: string): EditorHit[] {
+  if (!query) return [];
+  const lowerQuery = query.toLowerCase();
+  const out: EditorHit[] = [];
+
+  for (let lineNum = 1; lineNum <= text.lines; lineNum++) {
+    const line = text.line(lineNum);
+    const haystack = line.text.toLowerCase();
+    let from = 0;
+    while (from <= haystack.length - lowerQuery.length) {
+      const idx = haystack.indexOf(lowerQuery, from);
+      if (idx === -1) break;
+      const absFrom = line.from + idx;
+      out.push({ from: absFrom, to: absFrom + query.length, line: lineNum });
+      from = idx + lowerQuery.length;
+    }
+  }
+  return out;
+}
+```
+
+Walking line by line is deliberate: it stamps the source line for free, with no extra `text.lineAt()` call per hit, and the result is naturally ordered by offset (left to right, top to bottom). That ordering **is** the canonical index — a hit's position in this array is its identity. "Match #3" is `hits[2]`, full stop.
+
+<Note>
+
+Iterating with `text.line(n)` instead of scanning the whole string keeps the line number authoritative. CodeMirror's `Text` already knows where every line starts, so `line.from + idx` is the exact document offset — no manual newline counting that drifts on `\r\n`.
+
+</Note>
+
+## Driving editor decorations from the list
+
+The editor side is the easy half. Map each canonical hit to a highlight range and dispatch them through a search-highlight effect (see the [search extension](../extensions/search.mdx) for the underlying highlight layer). The active hit gets an extra flag so it can render differently.
+
+```ts
+import { EditorView } from "@codemirror/view";
+import { setSearchHighlights } from "@takazudo/cm-search-highlight";
+
+function applyEditorDecorations(
+  view: EditorView,
+  hits: EditorHit[],
+  activeIndex: number,
+): void {
+  const ranges = hits.map((hit, i) => ({
+    from: hit.from,
+    to: hit.to,
+    active: i === activeIndex,
+  }));
+  view.dispatch({ effects: setSearchHighlights(ranges) });
+}
+```
+
+The key point: **the decorations are a pure projection of the canonical list.** You never compute editor highlights independently — `ranges[i]` always corresponds to `hits[i]`. When the active pointer moves, you re-derive the whole range array from the same list and re-dispatch. There is exactly one source of "what is hit #i", and both the editor and the preview read from it.
+
+To make next/prev scroll the editor to the active match, push a `scrollIntoView` effect in the same transaction:
+
+```ts
+view.dispatch({
+  effects: [
+    setSearchHighlights(ranges),
+    EditorView.scrollIntoView(hits[activeIndex].from, { y: "center" }),
+  ],
+});
+```
+
+`scrollIntoView` only adjusts the viewport — it does not move the cursor or selection, so the user's editing position is preserved while navigating search results.
+
+## The preview as a parallel index
+
+The preview is rendered HTML, not source. To map a source line onto it, the renderer must leave a breadcrumb. A remark plugin that stamps each block-level element with its source line (`data-source-line="N"`) gives you exactly that anchor.
+
+Because every block carries a stamp, an inline element nested inside a block would also match a naive `[data-source-line="N"]` query. To select the **innermost** anchor for a line — the leaf block that actually holds the text — use a `:not(:has(...))` filter:
+
+```ts
+function findInnermostAnchors(
+  container: HTMLElement,
+  line: number,
+): HTMLElement[] {
+  const sel = `[data-source-line="${line}"]:not(:has([data-source-line="${line}"]))`;
+  return Array.from(container.querySelectorAll(sel)).filter(
+    (el): el is HTMLElement => el instanceof HTMLElement,
+  );
+}
+```
+
+Within a matched anchor, you find and wrap the query occurrences in `<mark>` elements. The crucial property is **ordering**: the marks come out in DOM document order, which is the same left-to-right reading order the editor walk used. So for a given line, the **K-th `<mark>` corresponds to the K-th editor hit on that line.**
+
+This is the heart of the design — the preview is a *parallel index*. You never try to align it character-for-character with the source. You only assert: per line, the i-th occurrence on each side is the same occurrence.
+
+### Pairing hits to marks by line
+
+With editor hits ordered by offset and preview marks ordered by DOM position, pairing is a per-line counter. Walk the canonical hits in order; for each, hand out the next unused mark on its line:
+
+```ts
+interface PreviewMark {
+  el: HTMLElement;
+  line: number;
+}
+
+interface CanonicalHit {
+  editor: EditorHit;
+  previewMark: PreviewMark | null;
+}
+
+function pairHitsByLine(
+  editorHits: EditorHit[],
+  marksByLine: Map<number, PreviewMark[]>,
+): CanonicalHit[] {
+  const usedPerLine = new Map<number, number>();
+  const out: CanonicalHit[] = [];
+
+  for (const hit of editorHits) {
+    const used = usedPerLine.get(hit.line) ?? 0;
+    const marks = marksByLine.get(hit.line);
+    const previewMark = marks && used < marks.length ? marks[used] : null;
+    usedPerLine.set(hit.line, used + 1);
+    out.push({ editor: hit, previewMark });
+  }
+  return out;
+}
+```
+
+The `usedPerLine` counter is what makes "K-th to K-th" work with multiple matches on one line. The first editor hit on line 7 takes `marks[0]`, the second takes `marks[1]`, and so on. Because both sequences are in the same reading order, the K-th-to-K-th pairing lines up the same occurrences without ever comparing text.
+
+## The superset / subset contract
+
+Pairing returns a `previewMark` of `null` when the editor has **more** hits on a line than the preview produced marks. This is not an error — it is the contract:
+
+> **Editor highlights are the superset; the preview is a best-effort subset.**
+
+A hit can exist in the source but have no visible preview counterpart:
+
+- The match falls inside a fenced code block whose content the preview does not surface as searchable inline text.
+- The match lands in Markdown syntax that the renderer consumes — the URL inside `[label](url)`, an image's alt text — so it is real source text but never appears as visible preview text.
+
+The rule: **an editor-only hit with a `null` preview pair still participates in canonical navigation.** It still highlights in the editor, it still occupies an index in the list, and next/prev still stops on it — the preview side simply has nothing to mark for that index.
+
+```ts
+function applyPreviewActiveClass(
+  hits: CanonicalHit[],
+  activeIndex: number,
+): void {
+  hits.forEach((hit, i) => {
+    const mark = hit.previewMark;
+    if (!mark) return; // editor-only hit: nothing to mark, but it still counts
+    mark.el.classList.toggle("find-match-active", i === activeIndex);
+  });
+}
+```
+
+Two things make this robust:
+
+1. **Navigation reads the canonical list, never the marks.** `next()`/`prev()` advance an index into `hits`, so a `null` preview pair never throws off the count or causes a skipped stop.
+2. **The active class is applied by index, not by mark.** When the pointer lands on an editor-only hit, `applyPreviewActiveClass` finds no mark and does nothing visible on the preview — but the editor still shows the active highlight, so the user sees where they are.
+
+<Warning>
+
+Do not derive the total hit count or the active ordinal from the preview marks. If you count marks instead of canonical hits, editor-only matches vanish from navigation and "3 of 8" silently becomes "3 of 5". The canonical list is the only thing allowed to define `total`.
+
+</Warning>
+
+## Wiring it into an orchestrator
+
+A small stateful object ties the pieces together. It owns the canonical list and the active pointer; a Find bar (or any consumer) calls `search`, `next`, `prev`, and subscribes for updates.
+
+```ts
+interface CrossPaneSearch {
+  search(query: string): void;
+  next(): void;
+  prev(): void;
+  stop(): void;
+}
+
+function createCrossPaneSearch(
+  getView: () => EditorView | null,
+  getPreview: () => HTMLElement | null,
+): CrossPaneSearch {
+  let hits: CanonicalHit[] = [];
+  let activeIndex = -1;
+
+  function apply(query: string): void {
+    clearPreviewMarks(getPreview());
+    hits = [];
+    activeIndex = -1;
+
+    const view = getView();
+    if (!query || !view) {
+      applyEditorDecorations(view!, [], -1);
+      return;
+    }
+
+    const editorHits = findEditorHits(view.state.doc, query);
+
+    // Build the per-line mark index from the preview DOM.
+    const preview = getPreview();
+    const marksByLine = new Map<number, PreviewMark[]>();
+    if (preview) {
+      const lines = new Set(editorHits.map((h) => h.line));
+      for (const line of lines) {
+        const marks: PreviewMark[] = [];
+        for (const anchor of findInnermostAnchors(preview, line)) {
+          for (const el of wrapMatches(anchor, query)) {
+            marks.push({ el, line });
+          }
+        }
+        if (marks.length > 0) marksByLine.set(line, marks);
+      }
+    }
+
+    hits = pairHitsByLine(editorHits, marksByLine);
+    activeIndex = hits.length > 0 ? 0 : -1;
+
+    applyEditorDecorations(view, editorHits, activeIndex);
+    applyPreviewActiveClass(hits, activeIndex);
+  }
+
+  function move(delta: 1 | -1): void {
+    if (hits.length === 0) return;
+    activeIndex = (activeIndex + delta + hits.length) % hits.length;
+    const view = getView();
+    if (view) {
+      applyEditorDecorations(view, hits.map((h) => h.editor), activeIndex);
+    }
+    applyPreviewActiveClass(hits, activeIndex);
+  }
+
+  return {
+    search: (q) => apply(q),
+    next: () => move(1),
+    prev: () => move(-1),
+    stop: () => apply(""),
+  };
+}
+```
+
+A few conventions worth keeping:
+
+- **Re-apply is explicit teardown + rebuild.** Every `apply()` clears the previous preview marks and dispatches before walking the new pass. Do not rely on CodeMirror's decoration auto-mapping or on the preview re-rendering to clean up after itself — when the source or the preview changes, tear down and recompute the canonical list from scratch.
+- **The orchestrator owns the pointer.** The Find bar never tracks "which mark is active" — it asks the orchestrator to move and reads back state. One owner, one source of truth.
+
+<Note>
+
+`remark-source-line` stamps only a block's **start** line. A hit on line 2+ of a multi-line paragraph or fenced block has no exact `[data-source-line]` anchor, so in production you resolve such a hit to its *containing* block — the largest stamped line `≤ N`. Likewise, a single match that visually spans inline boundaries (`fo<strong>ob</strong>ar`) is one logical match but several `<mark>` segments. Both are refinements on the same parallel-index idea; the core contract above does not change.
+
+</Note>
+
+## The DOM-walking detail
+
+Wrapping matches inside an anchor is the one piece that mutates the rendered DOM. Keep it scoped: walk only the text nodes *inside* the matched anchor, never the whole preview. A `TreeWalker` collects the text nodes; you then wrap occurrences from last to first so earlier offsets stay valid as you split.
+
+```ts
+function wrapMatches(anchor: HTMLElement, query: string): HTMLElement[] {
+  const lowerQuery = query.toLowerCase();
+  const walker = document.createTreeWalker(anchor, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    textNodes.push(n as Text);
+  }
+
+  const marks: HTMLElement[] = [];
+  for (const node of textNodes) {
+    const hay = node.textContent ?? "";
+    const offsets: number[] = [];
+    let from = 0;
+    while (from <= hay.length - lowerQuery.length) {
+      const idx = hay.toLowerCase().indexOf(lowerQuery, from);
+      if (idx === -1) break;
+      offsets.push(idx);
+      from = idx + lowerQuery.length;
+    }
+    // Split last-to-first so earlier offsets stay valid as we mutate.
+    for (let i = offsets.length - 1; i >= 0; i--) {
+      const idx = offsets[i];
+      let target = node.splitText(idx);
+      if (target.length > query.length) target.splitText(query.length);
+      const mark = document.createElement("mark");
+      mark.className = "find-match";
+      mark.textContent = target.textContent;
+      target.parentNode?.replaceChild(mark, target);
+      marks.unshift(mark);
+    }
+  }
+  return marks;
+}
+
+function clearPreviewMarks(container: HTMLElement | null): void {
+  if (!container) return;
+  const marks = container.querySelectorAll("mark.find-match");
+  const parents = new Set<Node>();
+  marks.forEach((mark) => {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    parent.replaceChild(
+      document.createTextNode(mark.textContent ?? ""),
+      mark,
+    );
+    parents.add(parent);
+  });
+  parents.forEach((p) => (p as Element).normalize());
+}
+```
+
+This is supporting machinery, not the lesson. The lesson is the ordering guarantee it provides: marks come back in DOM document order, which is the same order the editor walk produced, which is what makes the K-th-to-K-th pairing correct. `clearPreviewMarks` is the teardown half — it merges the wrapped text back and `normalize()`s so the next pass starts from clean text nodes.
+
+## Summary
+
+| Concern | Approach |
+|---|---|
+| Source of truth | The editor document. Run the query against it once. |
+| Canonical hit list | Ordered by offset; each hit stamped with `from`/`to` + 1-based source line. |
+| Editor highlights | Pure projection of the canonical list via `setSearchHighlights`. |
+| Preview mapping | Parallel index: K-th editor hit on a line ↔ K-th `<mark>` on that line. |
+| Source line → preview | `[data-source-line="N"]:not(:has([data-source-line="N"]))` innermost anchor. |
+| Editor-only hits | `null` preview pair; still highlights and still navigates. |
+| Hit count / ordinal | Always from the canonical list, never from preview marks. |
+| Navigation | Orchestrator owns the pointer; consumers call `next`/`prev`. |
+| Re-apply | Explicit teardown + rebuild; never rely on auto-mapping. |
+
+See also [Split Pane Content Sync](./split-pane-content-sync.mdx) for the contrasting case — syncing document and scroll between two editor panes — and the [search extension](../extensions/search.mdx) for the underlying highlight layer the editor side dispatches into.
