@@ -271,3 +271,156 @@ Try pressing Ctrl-F (or Cmd-F on macOS) to open the search panel in the editor b
     });
   `}
 />
+
+## Custom highlight layer
+
+Sometimes search logic lives outside CodeMirror — for example, when a find bar is shared between an editor pane and a preview pane, or when a custom matcher (fuzzy search, AST-aware search) runs independently and hands back document offsets. In those cases you do not want `@codemirror/search` at all; you want a thin decoration layer you can push pre-computed ranges into.
+
+The pattern is a `StateField<DecorationSet>` combined with a single `StateEffect` that replaces the entire highlight set in one transaction. The field's `update()` function handles two separate concerns:
+
+1. **Mapping through edits** — when the user types, `tr.changes` remaps the existing decorations to their new positions so highlights stay glued to the text between search dispatches.
+2. **Replacing on effect** — when your orchestrator has new results, it dispatches a `setSearchHighlightsEffect` with the full list of ranges and the field swaps the whole set wholesale.
+
+### Defining the effect and mark decorations
+
+```ts
+import { StateEffect } from "@codemirror/state";
+import { Decoration } from "@codemirror/view";
+
+export interface SearchHighlightRange {
+  from: number;
+  to: number;
+  active: boolean; // true => the navigation target (one per dispatch)
+}
+
+// Single-shot replace: the whole set is swapped each time.
+// No incremental "add one hit" effect — the caller owns the canonical list.
+export const setSearchHighlightsEffect =
+  StateEffect.define<SearchHighlightRange[]>();
+
+// Two-tier marks: active hit gets a distinct class for styling.
+const findMatchDeco = Decoration.mark({ class: "find-match" });
+const findMatchActiveDeco = Decoration.mark({ class: "find-match-active" });
+```
+
+### Building the decoration set defensively
+
+`Decoration.set` requires its input to be sorted by `from` position and rejects zero-length or inverted ranges. Sort and filter defensively so callers cannot accidentally violate the invariant:
+
+```ts
+import { Decoration } from "@codemirror/view";
+import type { DecorationSet } from "@codemirror/view";
+
+function buildDecorations(
+  ranges: readonly SearchHighlightRange[],
+  docLength: number,
+): DecorationSet {
+  if (ranges.length === 0) return Decoration.none;
+
+  const sorted = ranges
+    // Drop zero-length ranges (Decoration.mark requires from < to) and
+    // out-of-bounds ranges (defensive guard for upstream regex edge cases).
+    .filter((r) => r.from < r.to && r.from >= 0 && r.to <= docLength)
+    .slice()
+    .sort((a, b) => a.from - b.from || a.to - b.to);
+
+  if (sorted.length === 0) return Decoration.none;
+
+  return Decoration.set(
+    sorted.map((r) =>
+      (r.active ? findMatchActiveDeco : findMatchDeco).range(r.from, r.to),
+    ),
+  );
+}
+```
+
+### The state field
+
+The `update()` function maps existing decorations through `tr.changes` before checking for the effect. This ordering matters: if the effect carries new ranges, they are validated against the post-transaction document length (after the edit has already been applied).
+
+```ts
+import { StateField } from "@codemirror/state";
+import { Decoration, EditorView } from "@codemirror/view";
+import type { DecorationSet } from "@codemirror/view";
+
+export const searchHighlightField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+
+  update(value, tr) {
+    let next = value;
+
+    // Step 1: remap through edits so marks stay glued to text between dispatches.
+    // Without this, a character insertion before a highlight would leave the mark
+    // pointing at the wrong offset until the next search dispatch.
+    if (tr.docChanged) {
+      next = next.map(tr.changes);
+    }
+
+    // Step 2: if new ranges arrived, replace the entire set.
+    for (const e of tr.effects) {
+      if (e.is(setSearchHighlightsEffect)) {
+        next = buildDecorations(e.value, tr.state.doc.length);
+      }
+    }
+
+    return next;
+  },
+
+  // Wire the DecorationSet into the view's decoration layer.
+  provide: (field) => EditorView.decorations.from(field),
+});
+```
+
+### Pushing ranges from outside CodeMirror
+
+Register the field as an extension and push ranges via `view.dispatch`:
+
+```ts
+import { EditorView, basicSetup } from "codemirror";
+
+const view = new EditorView({
+  doc: "The quick brown fox jumps over the lazy dog.",
+  extensions: [basicSetup, searchHighlightField],
+  parent: document.getElementById("editor"),
+});
+
+// Called by your external search orchestrator whenever hits change.
+function applyHighlights(ranges: SearchHighlightRange[]) {
+  view.dispatch({
+    effects: setSearchHighlightsEffect.of(ranges),
+  });
+}
+
+// Example: highlight "fox" (basic) and "dog" (active / navigation target).
+applyHighlights([
+  { from: 16, to: 19, active: false }, // "fox"
+  { from: 40, to: 43, active: true },  // "dog" — the active navigation hit
+]);
+
+// Clear all highlights by dispatching an empty array.
+applyHighlights([]);
+```
+
+### CSS for the two tiers
+
+The mark classes need styling. Add them to your editor's stylesheet or `EditorView.theme`:
+
+```ts
+import { EditorView } from "@codemirror/view";
+
+const highlightTheme = EditorView.theme({
+  ".find-match": {
+    backgroundColor: "#ffd54f80",
+    borderRadius: "2px",
+  },
+  ".find-match-active": {
+    backgroundColor: "#ff980080",
+    outline: "1px solid #e65100",
+    borderRadius: "2px",
+  },
+});
+```
+
+:::note[Why not @codemirror/search?]
+`@codemirror/search` owns its own search state and runs its own query inside CM. If you have a custom matcher or need a single search to span multiple panes, a thin custom field like this is the right fit: it does nothing except hold ranges and remap them, and your orchestrator remains the sole source of truth for what matches exist.
+:::
