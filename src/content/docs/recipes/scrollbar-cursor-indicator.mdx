@@ -191,3 +191,215 @@ Or modify the `background` value in the indicator style to use a fixed color:
 ```ts
 background: "rgba(82, 139, 255, 0.8)",
 ```
+
+## Scrollbar Match Markers
+
+A related technique is painting one tick per **search match** on the scrollbar track — the "minimap of matches" you see in VS Code when a find is active. The plugin is a **pure consumer** of another extension's `StateField`: it never owns any state itself, it only reads positions out of the field and repaints DOM nodes.
+
+See [Search & Replace](../extensions/search.mdx) for the custom highlight layer that exposes `searchHighlightField`.
+
+### Reading positions from another extension's field
+
+`view.state.field(field, false)` is the safe way to read an optional field. Passing `false` as the second argument returns `undefined` instead of throwing when the field has not been mounted (e.g., during testing or when the search extension is not included):
+
+```ts
+const set = view.state.field(searchHighlightField, false);
+if (!set) return []; // field not mounted — nothing to paint
+```
+
+This lets the scrollbar-marker plugin stand on its own without a hard dependency on the search extension being present.
+
+### Collapsing many matches per line into one tick
+
+A document line can contain many search hits. Painting a separate tick for each one would clutter the scrollbar. The collapse strategy uses `lineBlockAt(from).top` as a unique key: two matches share the same `top` pixel when they fall on the same visual line, so they collapse to a single marker:
+
+```ts
+interface MarkerPos {
+  top: number;
+  active: boolean;
+}
+
+function collectMarkerPositions(view: EditorView): MarkerPos[] {
+  const set = view.state.field(searchHighlightField, false);
+  if (!set) return [];
+
+  const seen = new Map<number, MarkerPos>();
+  const docLength = view.state.doc.length;
+  const cursor = set.iter();
+
+  while (cursor.value !== null) {
+    const from = cursor.from;
+    // Decoration ranges past the live document length would throw
+    // inside lineBlockAt. The StateField maps ranges through tr.changes,
+    // so this is a defensive guard for stale positions only.
+    if (from < 0 || from > docLength) {
+      cursor.next();
+      continue;
+    }
+
+    const block = view.lineBlockAt(from);
+    const top = block.top; // pixel offset from content top — unique per visual line
+    const spec = cursor.value.spec as { class?: string };
+    const active = spec.class === "find-match-active";
+
+    const existing = seen.get(top);
+    if (existing) {
+      // Promote to active if any range on this line is the active hit.
+      if (active) existing.active = true;
+    } else {
+      seen.set(top, { top, active });
+    }
+    cursor.next();
+  }
+
+  return Array.from(seen.values());
+}
+```
+
+The two-tier system — basic vs. active — preserves the distinction between regular search hits and the currently focused hit, even after collapsing.
+
+### Repaint triggers and why `viewportChanged` is excluded
+
+The `update` method decides when to schedule a repaint:
+
+```ts
+update(update: ViewUpdate) {
+  const prevField = update.startState.field(searchHighlightField, false);
+  const nextField = update.state.field(searchHighlightField, false);
+  const fieldChanged = prevField !== nextField;
+
+  // Repaint on:
+  //   fieldChanged   — a new decoration set was dispatched (new search results)
+  //   docChanged     — doc edits remap positions through tr.changes,
+  //                    shifting block.top even if the field reference is stable
+  //   geometryChanged — window resize or line-wrap toggle shifts block.top
+  //
+  // NOT viewportChanged: the markers are absolute on the scrollbar track
+  // and do not depend on which lines CodeMirror currently virtualizes.
+  if (fieldChanged || update.docChanged || update.geometryChanged) {
+    this.scheduleRepaint();
+  }
+}
+```
+
+`viewportChanged` fires whenever CodeMirror's virtualized viewport scrolls — frequently. Scrollbar marker positions are computed from absolute `block.top` values relative to `contentHeight`, so they do not change as the user scrolls. Repaining on `viewportChanged` would do unnecessary work on every scroll event.
+
+### Full plugin
+
+```ts
+import { type Extension } from "@codemirror/state";
+import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
+import { searchHighlightField } from "./search-highlight"; // your field
+
+const SCROLLBAR_WIDTH = "14px";
+
+export function searchScrollbarMarkersExtension(): Extension {
+  return ViewPlugin.fromClass(
+    class {
+      private container: HTMLDivElement;
+      private pendingFrame = 0;
+
+      constructor(private view: EditorView) {
+        this.container = document.createElement("div");
+        Object.assign(this.container.style, {
+          position: "absolute",
+          right: "0",
+          top: "0",
+          width: SCROLLBAR_WIDTH,
+          height: "100%",
+          pointerEvents: "none",
+          zIndex: "10",
+        });
+        view.dom.appendChild(this.container);
+        this.scheduleRepaint();
+      }
+
+      update(update: ViewUpdate) {
+        const prevField = update.startState.field(searchHighlightField, false);
+        const nextField = update.state.field(searchHighlightField, false);
+        const fieldChanged = prevField !== nextField;
+        if (fieldChanged || update.docChanged || update.geometryChanged) {
+          this.scheduleRepaint();
+        }
+      }
+
+      private scheduleRepaint(): void {
+        if (this.pendingFrame) cancelAnimationFrame(this.pendingFrame);
+        this.pendingFrame = requestAnimationFrame(() => {
+          this.pendingFrame = 0;
+          this.repaint();
+        });
+      }
+
+      private repaint(): void {
+        const { scrollDOM } = this.view;
+        const { scrollHeight, clientHeight } = scrollDOM;
+
+        if (scrollHeight <= clientHeight || clientHeight === 0) {
+          this.container.replaceChildren();
+          return;
+        }
+
+        const positions = collectMarkerPositions(this.view);
+        if (positions.length === 0) {
+          this.container.replaceChildren();
+          return;
+        }
+
+        // contentHeight — same trap as the cursor indicator above.
+        const contentH = this.view.contentHeight;
+        if (contentH <= 0) {
+          this.container.replaceChildren();
+          return;
+        }
+
+        const scrollerTop = scrollDOM.offsetTop;
+        const trackHeight = clientHeight;
+
+        const fragment = document.createDocumentFragment();
+        for (const pos of positions) {
+          const ratio = pos.top / contentH;
+          const clamped = Math.max(0, Math.min(1, ratio));
+          const top = scrollerTop + clamped * trackHeight;
+          const marker = document.createElement("div");
+          marker.className = pos.active
+            ? "cm-search-scrollbar-marker cm-search-scrollbar-marker-active"
+            : "cm-search-scrollbar-marker";
+          marker.style.top = `${top}px`;
+          fragment.appendChild(marker);
+        }
+        this.container.replaceChildren(fragment);
+      }
+
+      destroy() {
+        if (this.pendingFrame) cancelAnimationFrame(this.pendingFrame);
+        this.container.remove();
+      }
+    },
+  );
+}
+```
+
+### CSS for the markers
+
+The ticks are thin absolutely-positioned divs. A distinct color distinguishes the active hit:
+
+```css
+.cm-search-scrollbar-marker {
+  position: absolute;
+  right: 0;
+  width: 14px;
+  height: 2px;
+  background: rgba(255, 200, 0, 0.6);
+}
+
+.cm-search-scrollbar-marker-active {
+  background: rgba(255, 140, 0, 0.9);
+}
+```
+
+<Note>
+
+Both the cursor-indicator and the match-marker container sit inside `view.dom` with `position: absolute`. They stack visually because both target the right edge of the editor. Give each a distinct `z-index` (or use CSS custom properties) if you need to control which one appears on top.
+
+</Note>
