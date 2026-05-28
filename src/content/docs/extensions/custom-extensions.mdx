@@ -320,3 +320,11 @@ Key points:
 - Increments numbered list markers automatically (`1.` becomes `2.`)
 - Preserves checkbox syntax (`- [ ]`) for task lists
 - Removes the list marker when the current item has no content (pressing Enter on an empty `- ` line clears the line)
+
+## See Also
+
+These recipes show advanced compositions built on the primitives covered in this page:
+
+- [IME Composition Gating](../recipes/ime-composition-gating.mdx) — using `ViewPlugin` and `StateField` together to block decorations during IME input
+- [Ghost Text Completion](../recipes/ghost-text-completion.mdx) — a `StateField`-driven inline suggestion widget with `decorations.compute()`
+- [Inline Command Capture](../recipes/inline-command-capture.mdx) — `transactionExtender` as a slash-command state machine with `StateEffect` and `StateField`

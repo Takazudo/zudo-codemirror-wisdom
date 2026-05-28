@@ -399,3 +399,8 @@ view.dispatch({
   changes: { from, to, insert: "replacement" },
 });
 ```
+
+## See Also
+
+- [Inline Command Capture](../recipes/inline-command-capture.mdx) — `transactionExtender` used as a slash-command state machine, with `StateEffect` and `StateField` managing transition state
+- [Stale Response Rejection](../recipes/stale-response-rejection.mdx) — monotonic `requestId` stored in a `StateField` to discard out-of-order async results

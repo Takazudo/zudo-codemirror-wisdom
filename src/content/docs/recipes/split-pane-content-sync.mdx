@@ -245,3 +245,7 @@ Instead, focus the editor explicitly when the pane gains focus (via click or key
 | Editor height 0 | `display: contents` breaks height chain | `absolute inset-0` wrapper with proper flex parent |
 | Paste tooltip (WKWebView) | `clipboard.readText()` on focusin | Only sync clipboard on window focus, not editor focusin |
 | Auto-focus conflicts | Multiple editors call `view.focus()` | `suppressAutoFocus` prop, explicit focus on pane gain |
+
+## See Also
+
+- [Editor + Preview Search Sync](./editor-preview-search-sync.mdx) — extends the split-pane pattern to synchronize a hit-index across an editor pane and a rendered preview pane
