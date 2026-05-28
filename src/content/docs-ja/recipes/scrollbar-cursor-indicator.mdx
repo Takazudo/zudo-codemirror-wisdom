@@ -79,7 +79,7 @@ function scrollbarCursorIndicator() {
         const { scrollDOM, state } = this.view;
         const { scrollHeight, clientHeight } = scrollDOM;
 
-        // コンテンツがスクロールしない場合は非表示
+        // Hide when content doesn't scroll
         if (scrollHeight <= clientHeight) {
           this.indicator.style.display = "none";
           return;
@@ -204,7 +204,7 @@ background: "rgba(82, 139, 255, 0.8)",
 
 ```ts
 const set = view.state.field(searchHighlightField, false);
-if (!set) return []; // フィールド未マウント — 何も描画しない
+if (!set) return []; // field not mounted — nothing to paint
 ```
 
 これにより、スクロールバーマーカープラグインは検索 Extension の存在に対してハードな依存を持たずに単独で動作できます。
@@ -229,22 +229,22 @@ function collectMarkerPositions(view: EditorView): MarkerPos[] {
 
   while (cursor.value !== null) {
     const from = cursor.from;
-    // ライブドキュメント長を超えるデコレーション範囲は
-    // lineBlockAt 内でスローされます。StateField は tr.changes を通じて
-    // 範囲をマップするため、これは古い位置に対する防御的ガードです。
+    // Decoration ranges past the live document length would throw
+    // inside lineBlockAt. The StateField maps ranges through tr.changes,
+    // so this is a defensive guard for stale positions only.
     if (from < 0 || from > docLength) {
       cursor.next();
       continue;
     }
 
     const block = view.lineBlockAt(from);
-    const top = block.top; // コンテンツ上端からのピクセルオフセット — 視覚的行ごとに一意
+    const top = block.top; // pixel offset from content top — unique per visual line
     const spec = cursor.value.spec as { class?: string };
     const active = spec.class === "find-match-active";
 
     const existing = seen.get(top);
     if (existing) {
-      // この行のいずれかの範囲がアクティブなヒットであれば、アクティブに昇格させる。
+      // Promote to active if any range on this line is the active hit.
       if (active) existing.active = true;
     } else {
       seen.set(top, { top, active });
@@ -268,14 +268,14 @@ update(update: ViewUpdate) {
   const nextField = update.state.field(searchHighlightField, false);
   const fieldChanged = prevField !== nextField;
 
-  // 再描画するケース:
-  //   fieldChanged   — 新しいデコレーションセットがディスパッチされた（新しい検索結果）
-  //   docChanged     — ドキュメント編集により tr.changes を通じて位置がリマップされ、
-  //                    フィールド参照が安定していても block.top がシフトする
-  //   geometryChanged — ウィンドウリサイズや行折り返しの切り替えで block.top がシフト
+  // Repaint on:
+  //   fieldChanged   — a new decoration set was dispatched (new search results)
+  //   docChanged     — doc edits remap positions through tr.changes,
+  //                    shifting block.top even if the field reference is stable
+  //   geometryChanged — window resize or line-wrap toggle shifts block.top
   //
-  //   viewportChanged は対象外: マーカーはスクロールバートラック上の絶対位置にあり、
-  //   CodeMirror が現在仮想化している行には依存しない。
+  // NOT viewportChanged: the markers are absolute on the scrollbar track
+  // and do not depend on which lines CodeMirror currently virtualizes.
   if (fieldChanged || update.docChanged || update.geometryChanged) {
     this.scheduleRepaint();
   }
@@ -346,7 +346,7 @@ export function searchScrollbarMarkersExtension(): Extension {
           return;
         }
 
-        // contentHeight — 上のカーソルインジケーターと同じ注意点。
+        // contentHeight — same trap as the cursor indicator above.
         const contentH = this.view.contentHeight;
         if (contentH <= 0) {
           this.container.replaceChildren();

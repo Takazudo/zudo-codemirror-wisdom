@@ -47,20 +47,20 @@ function twCompletionSource(context: CompletionContext): CompletionResult | null
   const line = context.state.doc.lineAt(context.pos);
   const textBefore = line.text.slice(0, context.pos - line.from);
 
-  // 判定: class/className 属性値の内側のみ補完する
+  // Gate: only suggest inside class/className attribute values
   const classAttrMatch = textBefore.match(
     /(?:class|className)\s*=\s*(?:"[^"]*$|'[^']*$|{`[^`]*$|{'[^']*$)/,
   );
   if (!classAttrMatch) return null;
 
-  // 置換範囲: カーソル直前の部分クラス名を検出する
+  // Determine the replace range: the partial class name before the cursor
   const wordMatch = context.matchBefore(/[\w\-/]*/);
   if (!wordMatch) return null;
 
   return {
-    from: wordMatch.from,   // 部分トークンの先頭から置換を開始
+    from: wordMatch.from,   // replace starts at the beginning of the partial token
     options: completionOptions,
-    validFor: /^[\w\-/]*$/, // この正規表現にマッチする間はフィルタリングを継続
+    validFor: /^[\w\-/]*$/, // keep filtering while the typed text still matches
   };
 }
 ```
@@ -74,10 +74,9 @@ function twCompletionSource(context: CompletionContext): CompletionResult | null
 ```ts
 import type { CompletionContext, CompletionResult, CompletionSource } from "@codemirror/autocomplete";
 
-// トリガーパターンは送信側リゾルバーと完全に一致させなければならない。
-// 以前は `(^|\s)@@\s+/…` を使っていたため行の途中でも発火し、
-// アクションハンドラーが反応しない位置でも補完候補が表示されていた。
-// スキルを選択しても何も起きないというバグを引き起こした。
+// The trigger pattern must mirror the submit-side resolver exactly.
+// Previously `(^|\s)@@\s+/…` fired mid-line, where the action handler
+// would never activate — picking a skill then silently did nothing.
 const PREFIX_PATTERN = /^[ \t]*@@ \/[a-z0-9-]*$/;
 
 export function skillAutocomplete(skills: SkillEntry[]): CompletionSource {
@@ -85,17 +84,17 @@ export function skillAutocomplete(skills: SkillEntry[]): CompletionSource {
     const line = context.state.doc.lineAt(context.pos);
     const before = line.text.slice(0, context.pos - line.from);
 
-    // 判定: カーソルまでの行がコマンドプレフィックスに一致するか
+    // Gate: line must match the command prefix up to cursor
     if (!PREFIX_PATTERN.test(before)) return null;
 
-    // 置換範囲: 先頭の `/` からカーソルまで
+    // Replace range: from the leading `/` to the current cursor
     const slashOffsetInLine = before.lastIndexOf("/");
     if (slashOffsetInLine < 0) return null;
     const from = line.from + slashOffsetInLine;
 
     return {
       from,
-      to: context.pos,  // `from` を手動計算したので `to` も明示的に指定
+      to: context.pos,  // explicit `to` since we computed `from` manually
       options: skills.map((skill) => ({
         label: "/" + skill.name,
         detail: skill.mode,
@@ -121,7 +120,7 @@ export function skillAutocomplete(skills: SkillEntry[]): CompletionSource {
 return {
   from: wordMatch.from,
   options: completionOptions,
-  validFor: /^[\w\-/]*$/, // 入力テキストがこのパターンに一致する間は結果を再利用
+  validFor: /^[\w\-/]*$/, // while typed text matches this, reuse the result
 };
 ```
 
@@ -152,12 +151,12 @@ const completionOptions: Completion[] = twClasses.map((entry) => ({
   label: entry.label,
   detail: entry.detail,
   type: "class",
-  section: entry.section,           // ポップアップの見出しでグループ化: "layout", "spacing", …
+  section: entry.section,           // groups under popup headings: "layout", "spacing", …
   boost: entry.section === "layout"
     ? 2
     : entry.section === "spacing"
       ? 1
-      : 0,                          // layout が最上位、spacing が次、以降は通常順
+      : 0,                          // layout floats first, spacing second, rest follow
 }));
 ```
 
@@ -228,7 +227,7 @@ import { autocompletion } from "@codemirror/autocomplete";
 import type { CompletionContext, CompletionResult, Completion } from "@codemirror/autocomplete";
 import { EditorState } from "@codemirror/state";
 
-// --- モジュールロード時に一度だけオプションを構築 ---
+// --- Options built once at module load ---
 const fruitOptions: Completion[] = [
   { label: "apple",      section: "fruit", boost: 1, type: "keyword" },
   { label: "apricot",    section: "fruit", boost: 0, type: "keyword" },
@@ -236,9 +235,9 @@ const fruitOptions: Completion[] = [
   { label: "blueberry",  section: "fruit", boost: 0, type: "keyword" },
 ];
 
-// --- コンテキスト判定付き CompletionSource ---
+// --- CompletionSource with context gating ---
 function fruitSource(context: CompletionContext): CompletionResult | null {
-  // "fruit:" で始まる行でのみ発火する
+  // Only fire when the line starts with "fruit:"
   const line = context.state.doc.lineAt(context.pos);
   const textBefore = line.text.slice(0, context.pos - line.from);
   if (!textBefore.startsWith("fruit:")) return null;
@@ -253,7 +252,7 @@ function fruitSource(context: CompletionContext): CompletionResult | null {
   };
 }
 
-// --- 拡張ファクトリー ---
+// --- Extension factory ---
 export function fruitCompletion() {
   return [
     autocompletion({ activateOnTyping: true }),

@@ -66,13 +66,17 @@ This multi-field `compute` is the load-bearing primitive for IME gating. Any cus
 Here is a self-contained extension that renders a marker widget at the cursor head and hides it while composing. It is stripped down to the IME-gating essentials -- a real suggestion engine would add its own content field, but the gating wiring is identical.
 
 ```ts
-import { StateEffect, StateField, RangeSet } from "@codemirror/state";
+import {
+  StateEffect,
+  StateField,
+  RangeSet,
+  type Extension,
+} from "@codemirror/state";
 import {
   Decoration,
   EditorView,
   WidgetType,
   type DecorationSet,
-  type Extension,
 } from "@codemirror/view";
 
 export const setComposingEffect = StateEffect.define<boolean>();
@@ -107,7 +111,7 @@ const markerField = StateField.define<boolean>({
   update: (value) => value,
   provide(field) {
     return EditorView.decorations.compute(
-      [field, composingField],
+      ["selection", field, composingField],
       (state): DecorationSet => {
         const show = state.field(field);
         const composing = state.field(composingField);

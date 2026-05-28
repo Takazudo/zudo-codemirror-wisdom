@@ -290,15 +290,15 @@ import { Decoration } from "@codemirror/view";
 export interface SearchHighlightRange {
   from: number;
   to: number;
-  active: boolean; // true => ナビゲーションターゲット（1 ディスパッチにつき 1 つ）
+  active: boolean; // true => the navigation target (one per dispatch)
 }
 
-// 単発置換: 毎回セット全体を入れ替える。
-// 「1 件だけ追加」するエフェクトは設けない — 呼び出し側が正規リストを管理する。
+// Single-shot replace: the whole set is swapped each time.
+// No incremental "add one hit" effect — the caller owns the canonical list.
 export const setSearchHighlightsEffect =
   StateEffect.define<SearchHighlightRange[]>();
 
-// 2 段階マーク: アクティブなヒットにはスタイリング用の独立クラスを付与する。
+// Two-tier marks: active hit gets a distinct class for styling.
 const findMatchDeco = Decoration.mark({ class: "find-match" });
 const findMatchActiveDeco = Decoration.mark({ class: "find-match-active" });
 ```
@@ -318,8 +318,8 @@ function buildDecorations(
   if (ranges.length === 0) return Decoration.none;
 
   const sorted = ranges
-    // 長さゼロの範囲を除外（Decoration.mark は from < to が必要）、
-    // 範囲外の範囲も除外（上流の正規表現エッジケースへの防御）。
+    // Drop zero-length ranges (Decoration.mark requires from < to) and
+    // out-of-bounds ranges (defensive guard for upstream regex edge cases).
     .filter((r) => r.from < r.to && r.from >= 0 && r.to <= docLength)
     .slice()
     .sort((a, b) => a.from - b.from || a.to - b.to);
@@ -349,14 +349,14 @@ export const searchHighlightField = StateField.define<DecorationSet>({
   update(value, tr) {
     let next = value;
 
-    // ステップ 1: 編集を通じてマップし、ディスパッチ間もマークがテキストに追従するようにする。
-    // これがないと、ハイライト前に文字を挿入するとマークが次の検索ディスパッチまで
-    // 誤ったオフセットを指し続けてしまう。
+    // Step 1: remap through edits so marks stay glued to text between dispatches.
+    // Without this, a character insertion before a highlight would leave the mark
+    // pointing at the wrong offset until the next search dispatch.
     if (tr.docChanged) {
       next = next.map(tr.changes);
     }
 
-    // ステップ 2: 新しい範囲が届いた場合、セット全体を置換する。
+    // Step 2: if new ranges arrived, replace the entire set.
     for (const e of tr.effects) {
       if (e.is(setSearchHighlightsEffect)) {
         next = buildDecorations(e.value, tr.state.doc.length);
@@ -366,7 +366,7 @@ export const searchHighlightField = StateField.define<DecorationSet>({
     return next;
   },
 
-  // DecorationSet をビューのデコレーションレイヤーに接続する。
+  // Wire the DecorationSet into the view's decoration layer.
   provide: (field) => EditorView.decorations.from(field),
 });
 ```
@@ -384,20 +384,20 @@ const view = new EditorView({
   parent: document.getElementById("editor"),
 });
 
-// 外部の検索オーケストレーターがヒットを変更するたびに呼び出す。
+// Called by your external search orchestrator whenever hits change.
 function applyHighlights(ranges: SearchHighlightRange[]) {
   view.dispatch({
     effects: setSearchHighlightsEffect.of(ranges),
   });
 }
 
-// 例: "fox"（基本）と "dog"（アクティブ / ナビゲーションターゲット）をハイライト。
+// Example: highlight "fox" (basic) and "dog" (active / navigation target).
 applyHighlights([
   { from: 16, to: 19, active: false }, // "fox"
-  { from: 40, to: 43, active: true },  // "dog" — アクティブなナビゲーションヒット
+  { from: 40, to: 43, active: true },  // "dog" — the active navigation hit
 ]);
 
-// 空配列をディスパッチしてすべてのハイライトをクリアする。
+// Clear all highlights by dispatching an empty array.
 applyHighlights([]);
 ```
 

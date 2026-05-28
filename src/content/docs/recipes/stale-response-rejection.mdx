@@ -17,11 +17,15 @@ The canonical fix is a **monotonic counter that lives inside the editor state.**
 The counter is part of the `StateField` value, not a React ref or a module-scope variable. Keeping it in editor state means it is transactional, has a single source of truth, and can never drift out of sync with the rest of the editor.
 
 ```ts
-import { EditorView, StateField, StateEffect } from "@codemirror/state";
+import { StateField, StateEffect } from "@codemirror/state";
+import type { EditorView } from "@codemirror/view";
 
 // The counter is a field of the value, alongside the payload it guards.
 type SuggestionState = { text: string | null; requestId: number };
 
+// Starting a request bumps the counter; a response carries the id it was
+// issued under, so update() can tell winners from losers.
+const beginRequest = StateEffect.define<null>();
 const setSuggestion = StateEffect.define<SuggestionState>();
 
 const suggestionField = StateField.define<SuggestionState>({
@@ -29,6 +33,11 @@ const suggestionField = StateField.define<SuggestionState>({
 
   update(value, tr) {
     for (const effect of tr.effects) {
+      if (effect.is(beginRequest)) {
+        // A new request starts: bump the counter so any in-flight response
+        // issued under an older id is now stale and will be rejected below.
+        value = { text: null, requestId: value.requestId + 1 };
+      }
       if (effect.is(setSuggestion)) {
         const incoming = effect.value;
         // Only late SET responses are rejected. A clear (text === null)
@@ -81,17 +90,20 @@ const captureField = StateField.define<{ active: boolean; requestId: number }>({
 
 ## Threading the ID Through the Async Call
 
-The filter line is meaningless unless the response carries the id it was *issued under*. Read the current `requestId` from state at dispatch time, thread it through the async call, and stamp it onto the response effect:
+The filter line is meaningless unless the response carries the id it was *issued under*. Begin the request (which bumps the counter), read the id it now owns, thread it through the async call, and stamp it onto the response effect:
 
 ```ts
 async function requestSuggestion(view: EditorView) {
-  // 1. Read the id the request is issued under.
+  // 1. Begin a new request: this bumps the counter in editor state.
+  view.dispatch({ effects: beginRequest.of(null) });
+
+  // 2. Read the id this request now owns (the freshly bumped value).
   const { requestId } = view.state.field(suggestionField);
 
-  // 2. Thread it through the async call (it does NOT change while awaiting).
+  // 3. Thread it through the async call (it does NOT change while awaiting).
   const text = await backend.complete(view.state.doc.toString());
 
-  // 3. Stamp the response with the id it was issued under.
+  // 4. Stamp the response with the id it was issued under.
   view.dispatch({
     effects: setSuggestion.of({ text, requestId }),
   });

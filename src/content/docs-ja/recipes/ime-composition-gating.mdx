@@ -66,13 +66,17 @@ provide(field) {
 以下は、カーソル位置にマーカーウィジェットを描画し、変換中はそれを隠す自己完結した拡張です。IME ゲーティングの要点だけに絞り込んであります。実際の候補エンジンなら独自の内容フィールドを足すことになりますが、ゲーティングの配線は同一です。
 
 ```ts
-import { StateEffect, StateField, RangeSet } from "@codemirror/state";
+import {
+  StateEffect,
+  StateField,
+  RangeSet,
+  type Extension,
+} from "@codemirror/state";
 import {
   Decoration,
   EditorView,
   WidgetType,
   type DecorationSet,
-  type Extension,
 } from "@codemirror/view";
 
 export const setComposingEffect = StateEffect.define<boolean>();
@@ -107,7 +111,7 @@ const markerField = StateField.define<boolean>({
   update: (value) => value,
   provide(field) {
     return EditorView.decorations.compute(
-      [field, composingField],
+      ["selection", field, composingField],
       (state): DecorationSet => {
         const show = state.field(field);
         const composing = state.field(composingField);
