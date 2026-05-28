@@ -1,0 +1,245 @@
+---
+title: IME Composition Gating for Decorations
+description: Suppress cursor-anchored widgets while an IME composition is active, using a composingField StateField, beforeinput detection, and the undocumented view.measure() synchronous-flush hack.
+sidebar_position: 14
+---
+
+When an editor renders a widget at the cursor head -- a ghost-text suggestion, an inline status pill, an autocomplete hint -- that widget sits exactly where an IME (Japanese, Chinese, Korean input) wants to anchor its candidate window. If the widget is still in the DOM while composition is active, the browser mis-measures the caret and the candidate popup jumps, flickers, or lands in the wrong place.
+
+The fix is a small, reusable pattern: mirror the DOM composition events into a `composingField` [StateField](../extensions/custom-extensions.mdx), consult that field inside `decorations.compute` so widgets are hidden while composing, and -- for the specific case of a widget sitting on the composition anchor -- force a synchronous DOM flush so the widget node is gone *before* the browser measures the caret.
+
+## The composing StateField
+
+`composingField` holds a single boolean: are we mid-composition? It is driven entirely by a `StateEffect` dispatched from DOM event handlers, so the rest of the extension can read composition state synchronously from `state.field(composingField)` instead of tracking raw DOM events.
+
+```ts
+import { StateEffect, StateField } from "@codemirror/state";
+
+// Effect that flips the composing flag. Dispatched from DOM handlers.
+export const setComposingEffect = StateEffect.define<boolean>();
+
+// Mirrors IME composition state into editor state for decoration gating.
+export const composingField = StateField.define<boolean>({
+  create: () => false,
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setComposingEffect)) return effect.value;
+    }
+    return value;
+  },
+});
+```
+
+The field is deliberately dumb: it just reflects the last `setComposingEffect`. All the timing logic lives in the DOM handlers below.
+
+## Computing decorations from multiple StateFields {#shared-callout}
+
+:::note[Shared pattern: `decorations.compute` over several fields]
+
+[Custom Extensions](../extensions/custom-extensions.mdx) shows the single-field form, `provide(field) => EditorView.decorations.compute([field], ...)`. But a decoration set frequently depends on **more than one** piece of state. IME gating is the canonical example: the widget's *content* lives in one field, but whether it should be *shown at all* lives in `composingField`.
+
+`EditorView.decorations.compute` takes an **array of dependencies**. The compute function re-runs whenever *any* listed field (or the doc, or the selection) changes, and reads each field from the passed-in `state`:
+
+```ts
+import { Decoration, EditorView, type DecorationSet } from "@codemirror/view";
+
+provide(field) {
+  return EditorView.decorations.compute(
+    [field, composingField], // re-compute when EITHER field changes
+    (state): DecorationSet => {
+      const composing = state.field(composingField);
+      const content = state.field(field);
+      // gate on composingField; build decorations from `field`
+      if (composing || !content) return Decoration.none;
+      return buildDecorations(state, content);
+    },
+  );
+}
+```
+
+This multi-field `compute` is the load-bearing primitive for IME gating. Any custom-decoration extension that must suppress its output during composition wires `composingField` in as a second dependency here.
+
+:::
+
+## A minimal cursor widget that gates on composition
+
+Here is a self-contained extension that renders a marker widget at the cursor head and hides it while composing. It is stripped down to the IME-gating essentials -- a real suggestion engine would add its own content field, but the gating wiring is identical.
+
+```ts
+import { StateEffect, StateField, RangeSet } from "@codemirror/state";
+import {
+  Decoration,
+  EditorView,
+  WidgetType,
+  type DecorationSet,
+  type Extension,
+} from "@codemirror/view";
+
+export const setComposingEffect = StateEffect.define<boolean>();
+
+export const composingField = StateField.define<boolean>({
+  create: () => false,
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setComposingEffect)) return effect.value;
+    }
+    return value;
+  },
+});
+
+class MarkerWidget extends WidgetType {
+  toDOM(): HTMLElement {
+    const span = document.createElement("span");
+    span.className = "cm-marker";
+    span.setAttribute("aria-hidden", "true");
+    span.textContent = "█"; // stand-in for any cursor-anchored content
+    return span;
+  }
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+// The marker lives in its own field so the decoration set has a content
+// dependency to pair with composingField in the multi-field compute.
+const markerField = StateField.define<boolean>({
+  create: () => true,
+  update: (value) => value,
+  provide(field) {
+    return EditorView.decorations.compute(
+      [field, composingField],
+      (state): DecorationSet => {
+        const show = state.field(field);
+        const composing = state.field(composingField);
+        // Hide the widget entirely while an IME composition is active.
+        if (!show || composing) return Decoration.none;
+        const head = state.selection.main.head;
+        return RangeSet.of([
+          Decoration.widget({ widget: new MarkerWidget(), side: 1 }).range(head),
+        ]);
+      },
+    );
+  },
+});
+```
+
+## The three DOM handlers
+
+Composition state cannot be derived from CodeMirror transactions alone -- it comes from the browser. Three DOM events, registered with `EditorView.domEventHandlers`, mirror the lifecycle into `composingField`:
+
+```ts
+function imeHandlers(): Extension {
+  return EditorView.domEventHandlers({
+    compositionstart(_event, view) {
+      enterComposing(view);
+      return false;
+    },
+    beforeinput(event, view) {
+      // Safari/WebKit fire compositionstart unreliably for some IMEs;
+      // insertCompositionText on beforeinput is the dependable signal.
+      if (event.inputType !== "insertCompositionText") return false;
+      // Skip the redundant dispatch on every composition-update beat.
+      if (view.state.field(composingField)) return false;
+      enterComposing(view);
+      return false;
+    },
+    compositionend(_event, view) {
+      view.dispatch({ effects: setComposingEffect.of(false) });
+      return false;
+    },
+  });
+}
+```
+
+Each handler returns `false` so CodeMirror still processes the event normally -- we are only *observing* composition, not intercepting it.
+
+### Why `beforeinput` + `insertCompositionText`?
+
+`compositionstart` is the textbook signal, but some IMEs (notably on WebKit) do not fire it reliably, or fire it late. The `beforeinput` event carries an `inputType`, and `inputType === "insertCompositionText"` fires for every composition keystroke. Treating the first such event as "composition started" closes the gap left by an unreliable `compositionstart`. The `if (composing) return false` guard prevents re-dispatching `setComposingEffect.of(true)` on every subsequent composition-update beat.
+
+## The `view.measure()` synchronous-flush hack
+
+This is the non-obvious part. When `compositionstart` fires, we want the cursor-anchored widget gone *before* the browser measures where to put the IME candidate window. But dispatching a transaction does not update the DOM synchronously -- CodeMirror batches DOM writes and applies them on its own schedule. So the sequence without a flush is:
+
+1. `compositionstart` fires.
+2. We dispatch a transaction setting `composing = true` (which removes the widget from the next decoration set).
+3. The browser measures the caret position **immediately** -- but the widget node is still in the DOM, so the caret anchor is wrong.
+4. CodeMirror flushes its DOM writes later. Too late: the candidate window already mis-rendered.
+
+The fix is to force CodeMirror to flush its pending DOM mutations synchronously, inside the same handler, right after the dispatch:
+
+```ts
+function enterComposing(view: EditorView): void {
+  view.dispatch({ effects: setComposingEffect.of(true) });
+  // Force a synchronous DOM flush so the cursor-anchored widget node is
+  // removed BEFORE WebKit measures the IME caret anchor (see #900/#901).
+  (view as unknown as { measure: () => void }).measure();
+}
+```
+
+`view.measure()` runs CodeMirror's pending measure/update cycle right now, synchronously, so the decoration recompute (widget removed) is written to the DOM before the browser proceeds to measure the composition anchor. This eliminates the candidate-window misplacement and flicker on IME input.
+
+:::warning[`measure()` is an internal API]
+
+`view.measure()` exists at runtime but is **not part of the public `EditorView` type** -- it is omitted from the published `.d.ts`. That is why the call is written through a cast: `(view as unknown as { measure: () => void }).measure()`. Relying on it is a deliberate trade-off: it is the only way to get a synchronous flush, but it can change without a semver-major bump because it is not a documented surface. Pin your `@codemirror/view` version and re-test IME behavior after upgrades. Background: CodeMirror issues [#900/#901].
+
+:::
+
+<Note>
+
+The `measure()` flush is only needed when a widget sits **on the composition anchor** (the cursor head). An extension whose decoration is elsewhere -- a line highlight, an end-of-line pill -- only needs the `composingField` gate, not the synchronous flush. See the mirrored variant below.
+
+</Note>
+
+## The simpler mirrored variant
+
+Not every IME-aware extension needs `measure()`. A decoration that does *not* sit on the composition anchor only needs to flip the flag; the standard async DOM update is fine. The handlers reduce to a plain mirror of the composition lifecycle into `composingField`:
+
+```ts
+const composingHandlers = EditorView.domEventHandlers({
+  compositionstart(_event, view) {
+    if (!view.state.field(composingField)) {
+      view.dispatch({ effects: setComposingEffect.of(true) });
+    }
+    return false;
+  },
+  beforeinput(event, view) {
+    if (event.inputType !== "insertCompositionText") return false;
+    if (!view.state.field(composingField)) {
+      view.dispatch({ effects: setComposingEffect.of(true) });
+    }
+    return false;
+  },
+  compositionend(_event, view) {
+    if (view.state.field(composingField)) {
+      view.dispatch({ effects: setComposingEffect.of(false) });
+    }
+    return false;
+  },
+});
+```
+
+Keeping the `composingField` shape identical across extensions matters: if a single editor mounts two IME-aware extensions, they share one consistent composing-flag history rather than fighting over conflicting state.
+
+## Putting it together
+
+```ts
+function imeAwareMarker(): Extension {
+  return [composingField, markerField, imeHandlers()];
+}
+
+const view = new EditorView({
+  doc: "Type with an IME enabled to see the marker disappear while composing.",
+  extensions: [imeAwareMarker()],
+  parent: document.querySelector("#editor")!,
+});
+```
+
+For the [EditorView](../core/editor-view.mdx) lifecycle and how DOM event handlers attach to it, and for the widget and decoration primitives used here, see [Custom Extensions](../extensions/custom-extensions.mdx).
+
+## Summary
+
+- A `composingField` `StateField` mirrors IME composition state, driven by a `setComposingEffect` dispatched from DOM handlers.
+- `EditorView.decorations.compute([contentField, composingField], ...)` computes one decoration set from multiple fields, gating widget output on composition.
+- Three DOM handlers (`compositionstart`, `beforeinput` with `inputType === "insertCompositionText"`, `compositionend`) drive the field; `beforeinput` covers IMEs where `compositionstart` is unreliable.
+- For a widget that sits on the composition anchor, `view.measure()` forces a synchronous DOM flush so the widget is removed before the browser measures the IME caret -- an internal API hidden from the public `.d.ts`.

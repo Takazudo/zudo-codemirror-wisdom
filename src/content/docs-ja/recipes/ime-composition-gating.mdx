@@ -1,0 +1,245 @@
+---
+title: 装飾の IME 変換中ゲーティング
+description: composingField StateField、beforeinput 検出、そして非公開の view.measure() 同期フラッシュハックを使い、IME 変換中はカーソル位置のウィジェットを抑制する。
+sidebar_position: 14
+---
+
+エディタがカーソル位置（cursor head）にウィジェットを描画するとき――ゴーストテキストの候補、インラインのステータスピル、オートコンプリートのヒントなど――そのウィジェットは、ちょうど IME（日本語・中国語・韓国語入力）が変換候補ウィンドウをアンカーしたい場所に重なります。変換中にウィジェットが DOM 内に残ったままだと、ブラウザはキャレット位置を誤って測定し、候補ポップアップが飛んだり、ちらついたり、間違った位置に表示されたりします。
+
+その対策は、小さく再利用しやすいパターンです。DOM の変換イベントを `composingField` という [StateField](../extensions/custom-extensions.mdx) にミラーし、そのフィールドを `decorations.compute` の中で参照して変換中はウィジェットを隠す。そして――ウィジェットが変換アンカーの位置に重なる特定のケースでは――同期的な DOM フラッシュを強制し、ブラウザがキャレットを測定する*前に*ウィジェットノードを消し去ります。
+
+## composing StateField
+
+`composingField` は単一の真偽値を保持します。いま変換中かどうか、です。これは完全に、DOM イベントハンドラから dispatch される `StateEffect` によって駆動されます。そのため拡張の残りの部分は、生の DOM イベントを追う代わりに、`state.field(composingField)` から変換状態を同期的に読み取れます。
+
+```ts
+import { StateEffect, StateField } from "@codemirror/state";
+
+// Effect that flips the composing flag. Dispatched from DOM handlers.
+export const setComposingEffect = StateEffect.define<boolean>();
+
+// Mirrors IME composition state into editor state for decoration gating.
+export const composingField = StateField.define<boolean>({
+  create: () => false,
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setComposingEffect)) return effect.value;
+    }
+    return value;
+  },
+});
+```
+
+このフィールドは意図的に単純です。最後の `setComposingEffect` を反映するだけです。タイミングのロジックはすべて、後述の DOM ハンドラ側にあります。
+
+## 複数の StateField から装飾を計算する {#shared-callout}
+
+:::note[共有パターン: 複数フィールドにまたがる `decorations.compute`]
+
+[Custom Extensions](../extensions/custom-extensions.mdx) では単一フィールド形式、すなわち `provide(field) => EditorView.decorations.compute([field], ...)` を示しています。しかし装飾セットは、しばしば**複数の**状態に依存します。IME ゲーティングはその典型例です。ウィジェットの*内容*は一方のフィールドに存在しますが、そもそも*表示すべきか*は `composingField` に存在します。
+
+`EditorView.decorations.compute` は**依存フィールドの配列**を受け取ります。計算関数は、列挙されたフィールド（あるいはドキュメント、選択範囲）の*いずれか*が変化するたびに再実行され、渡された `state` から各フィールドを読み取ります。
+
+```ts
+import { Decoration, EditorView, type DecorationSet } from "@codemirror/view";
+
+provide(field) {
+  return EditorView.decorations.compute(
+    [field, composingField], // re-compute when EITHER field changes
+    (state): DecorationSet => {
+      const composing = state.field(composingField);
+      const content = state.field(field);
+      // gate on composingField; build decorations from `field`
+      if (composing || !content) return Decoration.none;
+      return buildDecorations(state, content);
+    },
+  );
+}
+```
+
+この複数フィールドの `compute` こそが、IME ゲーティングを支える要となるプリミティブです。変換中に出力を抑制しなければならないカスタム装飾拡張は、ここで `composingField` を 2 つ目の依存として組み込みます。
+
+:::
+
+## 変換状態でゲートする最小のカーソルウィジェット
+
+以下は、カーソル位置にマーカーウィジェットを描画し、変換中はそれを隠す自己完結した拡張です。IME ゲーティングの要点だけに絞り込んであります。実際の候補エンジンなら独自の内容フィールドを足すことになりますが、ゲーティングの配線は同一です。
+
+```ts
+import { StateEffect, StateField, RangeSet } from "@codemirror/state";
+import {
+  Decoration,
+  EditorView,
+  WidgetType,
+  type DecorationSet,
+  type Extension,
+} from "@codemirror/view";
+
+export const setComposingEffect = StateEffect.define<boolean>();
+
+export const composingField = StateField.define<boolean>({
+  create: () => false,
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setComposingEffect)) return effect.value;
+    }
+    return value;
+  },
+});
+
+class MarkerWidget extends WidgetType {
+  toDOM(): HTMLElement {
+    const span = document.createElement("span");
+    span.className = "cm-marker";
+    span.setAttribute("aria-hidden", "true");
+    span.textContent = "█"; // stand-in for any cursor-anchored content
+    return span;
+  }
+  ignoreEvent(): boolean {
+    return true;
+  }
+}
+
+// The marker lives in its own field so the decoration set has a content
+// dependency to pair with composingField in the multi-field compute.
+const markerField = StateField.define<boolean>({
+  create: () => true,
+  update: (value) => value,
+  provide(field) {
+    return EditorView.decorations.compute(
+      [field, composingField],
+      (state): DecorationSet => {
+        const show = state.field(field);
+        const composing = state.field(composingField);
+        // Hide the widget entirely while an IME composition is active.
+        if (!show || composing) return Decoration.none;
+        const head = state.selection.main.head;
+        return RangeSet.of([
+          Decoration.widget({ widget: new MarkerWidget(), side: 1 }).range(head),
+        ]);
+      },
+    );
+  },
+});
+```
+
+## 3 つの DOM ハンドラ
+
+変換状態は CodeMirror のトランザクションだけからは導けません。ブラウザから来るものです。`EditorView.domEventHandlers` で登録する 3 つの DOM イベントが、そのライフサイクルを `composingField` にミラーします。
+
+```ts
+function imeHandlers(): Extension {
+  return EditorView.domEventHandlers({
+    compositionstart(_event, view) {
+      enterComposing(view);
+      return false;
+    },
+    beforeinput(event, view) {
+      // Safari/WebKit fire compositionstart unreliably for some IMEs;
+      // insertCompositionText on beforeinput is the dependable signal.
+      if (event.inputType !== "insertCompositionText") return false;
+      // Skip the redundant dispatch on every composition-update beat.
+      if (view.state.field(composingField)) return false;
+      enterComposing(view);
+      return false;
+    },
+    compositionend(_event, view) {
+      view.dispatch({ effects: setComposingEffect.of(false) });
+      return false;
+    },
+  });
+}
+```
+
+各ハンドラは `false` を返すので、CodeMirror は引き続きイベントを通常どおり処理します。私たちは変換を*観測している*だけで、横取りしているわけではありません。
+
+### なぜ `beforeinput` + `insertCompositionText` なのか
+
+`compositionstart` が教科書どおりのシグナルですが、一部の IME（特に WebKit 上）はこれを確実には発火しなかったり、発火が遅れたりします。`beforeinput` イベントは `inputType` を持っており、`inputType === "insertCompositionText"` は変換の打鍵ごとに発火します。この種の最初のイベントを「変換開始」とみなすことで、信頼できない `compositionstart` が残した隙を埋められます。`if (composing) return false` のガードは、その後の変換更新（composition-update）のたびに `setComposingEffect.of(true)` を再 dispatch するのを防ぎます。
+
+## `view.measure()` 同期フラッシュハック
+
+ここが非自明な部分です。`compositionstart` が発火したら、ブラウザが IME 候補ウィンドウの配置を測定する*前に*、カーソル位置のウィジェットを消したいわけです。ところがトランザクションを dispatch しても DOM は同期的には更新されません。CodeMirror は DOM への書き込みをまとめ、独自のスケジュールで適用します。そのため、フラッシュを行わない場合の流れは次のようになります。
+
+1. `compositionstart` が発火する。
+2. `composing = true` をセットするトランザクションを dispatch する（これにより次の装飾セットからウィジェットが取り除かれる）。
+3. ブラウザは**ただちに**キャレット位置を測定する――しかしウィジェットノードはまだ DOM 内にあるため、キャレットのアンカーが誤る。
+4. CodeMirror は後から DOM 書き込みをフラッシュする。手遅れだ。候補ウィンドウはすでに誤った位置に描画されている。
+
+対策は、同じハンドラ内で dispatch の直後に、保留中の DOM 変更を同期的にフラッシュするよう CodeMirror に強制することです。
+
+```ts
+function enterComposing(view: EditorView): void {
+  view.dispatch({ effects: setComposingEffect.of(true) });
+  // Force a synchronous DOM flush so the cursor-anchored widget node is
+  // removed BEFORE WebKit measures the IME caret anchor (see #900/#901).
+  (view as unknown as { measure: () => void }).measure();
+}
+```
+
+`view.measure()` は CodeMirror の保留中の measure/update サイクルを、いま、同期的に実行します。これにより装飾の再計算（ウィジェット除去）が、ブラウザが変換アンカーの測定に進む前に DOM へ書き込まれます。これで IME 入力時の候補ウィンドウのずれやちらつきが解消されます。
+
+:::warning[`measure()` は内部 API]
+
+`view.measure()` はランタイムには存在しますが、**公開された `EditorView` の型には含まれていません**。公開される `.d.ts` から省かれています。だからこそこの呼び出しはキャスト経由で書かれています。すなわち `(view as unknown as { measure: () => void }).measure()` です。これに依存するのは意図的なトレードオフです。同期フラッシュを得る唯一の方法ですが、文書化された API 面ではないため、semver のメジャーを上げずに変更されうるのです。`@codemirror/view` のバージョンを固定し、アップグレード後は IME の挙動を再テストしてください。背景は CodeMirror の issue [#900/#901](https://github.com/codemirror/dev/issues/900) です。
+
+:::
+
+<Note>
+
+`measure()` のフラッシュが必要なのは、ウィジェットが**変換アンカー**（カーソル位置）に重なる場合だけです。装飾がそれ以外の場所にある拡張――行ハイライトや行末のピルなど――では、同期フラッシュは不要で `composingField` によるゲートだけで十分です。下記のミラー版を参照してください。
+
+</Note>
+
+## より単純なミラー版
+
+すべての IME 対応拡張に `measure()` が必要なわけではありません。変換アンカーに*重ならない*装飾なら、フラグを切り替えるだけでよく、標準的な非同期 DOM 更新で問題ありません。ハンドラは、変換ライフサイクルを `composingField` へ素直にミラーするだけのものに縮小されます。
+
+```ts
+const composingHandlers = EditorView.domEventHandlers({
+  compositionstart(_event, view) {
+    if (!view.state.field(composingField)) {
+      view.dispatch({ effects: setComposingEffect.of(true) });
+    }
+    return false;
+  },
+  beforeinput(event, view) {
+    if (event.inputType !== "insertCompositionText") return false;
+    if (!view.state.field(composingField)) {
+      view.dispatch({ effects: setComposingEffect.of(true) });
+    }
+    return false;
+  },
+  compositionend(_event, view) {
+    if (view.state.field(composingField)) {
+      view.dispatch({ effects: setComposingEffect.of(false) });
+    }
+    return false;
+  },
+});
+```
+
+`composingField` の形を拡張間で同一に保つことには意味があります。1 つのエディタが 2 つの IME 対応拡張をマウントする場合、それらが競合する状態を奪い合うのではなく、一貫した 1 つの composing フラグ履歴を共有できるからです。
+
+## まとめて組み立てる
+
+```ts
+function imeAwareMarker(): Extension {
+  return [composingField, markerField, imeHandlers()];
+}
+
+const view = new EditorView({
+  doc: "Type with an IME enabled to see the marker disappear while composing.",
+  extensions: [imeAwareMarker()],
+  parent: document.querySelector("#editor")!,
+});
+```
+
+[EditorView](../core/editor-view.mdx) のライフサイクルや DOM イベントハンドラがどのようにアタッチされるか、またここで使ったウィジェットや装飾のプリミティブについては、[Custom Extensions](../extensions/custom-extensions.mdx) を参照してください。
+
+## サマリー
+
+- `composingField` という `StateField` が IME 変換状態をミラーし、DOM ハンドラから dispatch される `setComposingEffect` によって駆動される。
+- `EditorView.decorations.compute([contentField, composingField], ...)` は複数フィールドから 1 つの装飾セットを計算し、変換状態に応じてウィジェット出力をゲートする。
+- 3 つの DOM ハンドラ（`compositionstart`、`inputType === "insertCompositionText"` を伴う `beforeinput`、`compositionend`）がフィールドを駆動する。`beforeinput` は `compositionstart` が信頼できない IME を補う。
+- 変換アンカーに重なるウィジェットの場合、`view.measure()` が同期的な DOM フラッシュを強制し、ブラウザが IME キャレットを測定する前にウィジェットを除去する――これは公開 `.d.ts` から隠された内部 API である。
