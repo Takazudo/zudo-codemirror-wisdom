@@ -1,0 +1,154 @@
+---
+title: Stale Async-Response Rejection
+description: Reject out-of-order and late backend responses by embedding a monotonic requestId inside a StateField value and filtering effects in update().
+sidebar_position: 15
+---
+
+## The Problem: Responses Arrive Out of Order
+
+Any CodeMirror extension that talks to a network or an AI backend — autocomplete, async lint, AI ghost text — fires requests and waits for responses. The trap is that **responses do not arrive in the order they were requested.** Request A goes out, then the user keeps typing and request B goes out; B's response may land *before* A's. If you blindly apply every response, A's stale answer overwrites B's fresh one, and the editor shows a suggestion for text the user already moved past.
+
+Out-of-order delivery is the default, not the edge case. The editor must reject the loser.
+
+The canonical fix is a **monotonic counter that lives inside the editor state.** Every request is tagged with the counter's value at dispatch time. When a response comes back, the `update()` function compares the response's tag against the current counter and discards anything older.
+
+## Where the Counter Lives: Inside the StateField Value
+
+The counter is part of the `StateField` value, not a React ref or a module-scope variable. Keeping it in editor state means it is transactional, has a single source of truth, and can never drift out of sync with the rest of the editor.
+
+```ts
+import { EditorView, StateField, StateEffect } from "@codemirror/state";
+
+// The counter is a field of the value, alongside the payload it guards.
+type SuggestionState = { text: string | null; requestId: number };
+
+const setSuggestion = StateEffect.define<SuggestionState>();
+
+const suggestionField = StateField.define<SuggestionState>({
+  create: () => ({ text: null, requestId: 0 }),
+
+  update(value, tr) {
+    for (const effect of tr.effects) {
+      if (effect.is(setSuggestion)) {
+        const incoming = effect.value;
+        // Only late SET responses are rejected. A clear (text === null)
+        // always goes through — you must always be able to dismiss.
+        if (incoming.text !== null && incoming.requestId < value.requestId) {
+          return value; // stale response — discard, keep current state
+        }
+        return incoming;
+      }
+    }
+    return value;
+  },
+});
+```
+
+The single line that does the work is:
+
+```ts
+if (incoming.text !== null && incoming.requestId < value.requestId) return value;
+```
+
+`incoming.requestId < value.requestId` means "this response was issued under an older request than the one we are currently tracking" — so it lost the race and is thrown away.
+
+Note the `text !== null` guard: the stale check applies only when **setting** a suggestion. A **clear** (`text === null`) passes through unconditionally, because dismissing the current suggestion must always work regardless of request ordering.
+
+## When to Bump It: Every New Request / Mode-Enter
+
+The counter increments whenever a new request begins. In a "capture mode" extension (where entering the mode kicks off a backend call), the enter effect bumps it:
+
+```ts
+const enterCaptureEffect = StateEffect.define<{ command: string }>();
+
+const captureField = StateField.define<{ active: boolean; requestId: number }>({
+  create: () => ({ active: false, requestId: 0 }),
+
+  update(value, tr) {
+    let next = value;
+    for (const e of tr.effects) {
+      if (e.is(enterCaptureEffect)) {
+        // Bump on every enter so any in-flight response from a previous
+        // capture is now older than the current requestId, and will be
+        // filtered when it eventually arrives.
+        next = { active: true, requestId: next.requestId + 1 };
+      }
+    }
+    return next;
+  },
+});
+```
+
+## Threading the ID Through the Async Call
+
+The filter line is meaningless unless the response carries the id it was *issued under*. Read the current `requestId` from state at dispatch time, thread it through the async call, and stamp it onto the response effect:
+
+```ts
+async function requestSuggestion(view: EditorView) {
+  // 1. Read the id the request is issued under.
+  const { requestId } = view.state.field(suggestionField);
+
+  // 2. Thread it through the async call (it does NOT change while awaiting).
+  const text = await backend.complete(view.state.doc.toString());
+
+  // 3. Stamp the response with the id it was issued under.
+  view.dispatch({
+    effects: setSuggestion.of({ text, requestId }),
+  });
+  // update() compares this requestId against the (possibly newer) current
+  // value and rejects it if a newer request has since started.
+}
+```
+
+The loop is now closed: a new request bumps the counter in state, the request captures that value, the response carries it back, and `update()` rejects it if the counter has moved on.
+
+## Why Exit Must Preserve, Not Reset, the Counter
+
+The subtle part: when the mode exits (user cancels, suggestion is dismissed), **preserve the counter — do not reset it to zero.**
+
+```ts
+const exitCaptureEffect = StateEffect.define<null>();
+
+// inside update():
+if (e.is(exitCaptureEffect)) {
+  // Preserve requestId so stale responses to the just-exited capture
+  // continue to be filtered. Resetting to 0 reopens the race.
+  next = { ...next, active: false };
+}
+```
+
+Here is the concrete failure if you reset on exit:
+
+1. Capture A enters → bumps `requestId` to `5` → fires `request@5` (slow).
+2. User cancels A → exit. **If exit resets to `0`**, the counter is back at `0`.
+3. Capture B enters → bumps `0` to `1` → fires `request@1`.
+4. A's slow `response@5` finally lands → `update()` checks `5 < 1`? No → **accepted, clobbering B.**
+
+With **preserve-on-exit**, the counter stays at `5` through the exit. B's enter bumps it to `6`. A's `response@5` lands → `5 < 6` → rejected. Correct.
+
+The guarantee comes from **monotonicity**: the counter only ever increases. Because it never decreases, every later request is tagged with a strictly higher id than every earlier one, so an old response can never out-rank a newer request. Resetting on exit breaks monotonicity and reopens exactly the race the pattern is meant to close.
+
+## Contrast: A React-Level Counter Is a Different Layer
+
+The [Split Pane Content Sync](./split-pane-content-sync.mdx) recipe guards overlapping async focus changes with a monotonic counter too — a `focusChangeIdRef` held in a React ref, checked manually after each `await` and bailing if a newer change has started.
+
+It is the **same idea** (a monotonic guard against out-of-order async work) at a **different layer**:
+
+| | React `focusChangeIdRef` | StateField `requestId` |
+|---|---|---|
+| Where it lives | React ref, component scope | Inside the editor state value |
+| How it's checked | Manually, after each `await` | Declaratively, in `update()` |
+| Source of truth | Lives outside the editor | Single source of truth in editor state |
+| Drift risk | Can desync from editor state | Transactional — cannot drift |
+
+Use the React-ref version when the async work is owned by the React component (focus orchestration, disk I/O). Use the StateField version when the async work feeds the editor's own state (suggestions, lint, decorations) — it keeps the guard transactional and inside the one place that already owns the truth.
+
+## Summary
+
+- Embed a **monotonic `requestId` inside the StateField value**, next to the payload it guards.
+- **Bump** it on every new request / mode-enter.
+- **Tag** each request with the id at dispatch time and thread it through the async call back into the response effect.
+- **Filter** in `update()`: `if (incoming.text !== null && incoming.requestId < value.requestId) return value;` — reject late sets, always allow clears.
+- **Preserve** the counter on exit; never reset it, or you reopen the race.
+
+This is the canonical correctness pattern for any network- or AI-backed extension. For the transaction and effect mechanics it builds on, see [Transactions](../core/transactions.mdx).
