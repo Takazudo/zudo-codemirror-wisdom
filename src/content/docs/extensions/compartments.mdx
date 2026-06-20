@@ -126,7 +126,7 @@ Try toggling line numbers on and off using the button below:
 
     // Use minimalSetup (no built-in lineNumbers) so compartment has full control
     const view = new EditorView({
-      doc: 'function hello() {\\n  ...',
+      doc: 'function hello() {\\n  ...\\n}\\n',
       extensions: [
         minimalSetup,
         highlightActiveLine(),

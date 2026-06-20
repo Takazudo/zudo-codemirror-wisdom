@@ -1,0 +1,73 @@
+# Known exceptions for `pnpm run check:links` (consumed by
+# `scripts/check-links.js --allowlist=...`).
+#
+# Format: `<file>:<line>:<href>` per line. `#` comments and blank
+# lines are ignored. Each entry MUST match the printed report
+# verbatim (file path relative to repo root, 1-based line number,
+# href as it appeared in the source/dist).
+#
+# Add entries here when an issue cannot be fixed at the source —
+# typically: doc pages that reference EN-only siblings from JA, or
+# absolute hrefs that point at runtime-generated routes with no
+# MDX file.
+#
+# When ANY of these stops being a known exception (e.g. someone
+# writes the missing JA mirror page), DELETE the entry — the
+# strict gate then surfaces real regressions in the same category.
+#
+# ----- JA header nav → default-locale-only /docs/claude (44 entries) ---
+#
+# `/docs/claude/` is listed in settings.defaultLocaleOnlyPrefixes, so the
+# claude category (generated: true, EN-only via the claude-resources
+# integration) is NOT built under the JA locale — there is no
+# /ja/docs/claude route. The package <Header> still localizes every
+# settings.headerNav item (including the "Claude" entry) by prefixing the
+# active locale, so every JA page emits a header link to /ja/docs/claude.
+# The package Header has no hook to drop a nav item for a default-locale-only
+# category, so this cannot be fixed at the source without removing the Claude
+# header-nav item for JA. It is the documented "JA references an EN-only
+# page" exception. Regenerate this block if the JA page count changes.
+dist/ja/docs/core/editor-state/index.html:76:/ja/docs/claude
+dist/ja/docs/core/editor-view/index.html:76:/ja/docs/claude
+dist/ja/docs/core/extensions/index.html:76:/ja/docs/claude
+dist/ja/docs/core/index.html:76:/ja/docs/claude
+dist/ja/docs/core/keymaps/index.html:76:/ja/docs/claude
+dist/ja/docs/core/transactions/index.html:76:/ja/docs/claude
+dist/ja/docs/extensions/autocomplete/index.html:76:/ja/docs/claude
+dist/ja/docs/extensions/compartments/index.html:76:/ja/docs/claude
+dist/ja/docs/extensions/custom-extensions/index.html:76:/ja/docs/claude
+dist/ja/docs/extensions/index.html:76:/ja/docs/claude
+dist/ja/docs/extensions/language-support/index.html:76:/ja/docs/claude
+dist/ja/docs/extensions/palette-theme-integration/index.html:76:/ja/docs/claude
+dist/ja/docs/extensions/search/index.html:76:/ja/docs/claude
+dist/ja/docs/extensions/themes/index.html:76:/ja/docs/claude
+dist/ja/docs/overview/codemirror-wisdom-skill/index.html:76:/ja/docs/claude
+dist/ja/docs/overview/index.html:76:/ja/docs/claude
+dist/ja/docs/overview/installation/index.html:76:/ja/docs/claude
+dist/ja/docs/overview/quick-reference/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/bracket-colorization/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/display-scale-integration/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/editor-preview-search-sync/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/ghost-text-completion/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/ime-composition-gating/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/indent-guides/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/inline-command-capture/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/markdown-editor/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/markdown-list-handling/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/performance/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/scrollbar-cursor-indicator/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/settings-driven-editor/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/split-pane-content-sync/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/stale-response-rejection/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/tauri-webview/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/typewriter-scrolling/index.html:76:/ja/docs/claude
+dist/ja/docs/recipes/vim-editor/index.html:76:/ja/docs/claude
+dist/ja/docs/vim-mode/clipboard/index.html:76:/ja/docs/claude
+dist/ja/docs/vim-mode/commands/index.html:76:/ja/docs/claude
+dist/ja/docs/vim-mode/custom-keymaps/index.html:76:/ja/docs/claude
+dist/ja/docs/vim-mode/ex-commands/index.html:76:/ja/docs/claude
+dist/ja/docs/vim-mode/index.html:76:/ja/docs/claude
+dist/ja/docs/vim-mode/options/index.html:76:/ja/docs/claude
+dist/ja/docs/vim-mode/vimrc/index.html:76:/ja/docs/claude
+dist/ja/index.html:76:/ja/docs/claude
