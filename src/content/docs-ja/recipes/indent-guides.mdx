@@ -153,7 +153,7 @@ const indentGuidesTheme = EditorView.baseTheme({
 - **`repeating-linear-gradient`** -- `2ch` ごとに 1px の垂直線を描画し、インデントレベルごとに1本のガイドを作成
 - **`color-mix(in oklch, var(--palette-fg) 12%, transparent)`** -- 前景色を 12% の不透明度でミックスし、ガイドを控えめに表示。ライトテーマとダークテーマに自動的に適応
 - **`backgroundOrigin: content-box`** と `paddingLeft: inherit` -- グラディエントがエディターの水平パディングの後から開始
-- **`left: calc(-1 * var(--cm-hang, 0px))`** -- リストハンギングインデント Extension によるマージンシフトを補正するために擬似要素をオフセット（[Markdown リスト処理](/docs-ja/recipes/markdown-list-handling/)を参照）
+- **`left: calc(-1 * var(--cm-hang, 0px))`** -- リストハンギングインデント Extension によるマージンシフトを補正するために擬似要素をオフセット（[Markdown リスト処理](/ja/docs/recipes/markdown-list-handling/)を参照）
 - **`pointerEvents: none`** -- 擬似要素がクリックを妨げないように設定
 
 <Tip>

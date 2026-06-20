@@ -260,7 +260,7 @@ update(update: ViewUpdate) {
 
 ## 両方の Extension を一緒に使用する
 
-ハンギングインデント Extension が使用する `margin-left` / `text-indent` アプローチは、インデントガイド Extension（[インデントガイド](/docs-ja/recipes/indent-guides/)を参照）にも影響します。インデントガイドは擬似要素に `left: calc(-1 * var(--cm-hang, 0px))` を使用してマージンシフトを補正し、リスト行と非リスト行の両方でガイドが正しく配置されるようにします。
+ハンギングインデント Extension が使用する `margin-left` / `text-indent` アプローチは、インデントガイド Extension（[インデントガイド](/ja/docs/recipes/indent-guides/)を参照）にも影響します。インデントガイドは擬似要素に `left: calc(-1 * var(--cm-hang, 0px))` を使用してマージンシフトを補正し、リスト行と非リスト行の両方でガイドが正しく配置されるようにします。
 
 ```ts
 const extensions = [
