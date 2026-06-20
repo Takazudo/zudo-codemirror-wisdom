@@ -14,7 +14,7 @@ compatibility_flags = ["nodejs_compat"]
 # warns "Unexpected fields found in assets field" and silently ignores them).
 #
 # workers_dev enables the worker's PUBLIC *.workers.dev subdomain
-# (zudo-test-wisdom.takazudo.workers.dev). It is REQUIRED for the
+# (zudo-codemirror-wisdom.takazudo.workers.dev). It is REQUIRED for the
 # preview-alias URLs below to actually route: with workers_dev disabled,
 # Cloudflare still PRINTS the pr-<N> preview-alias URL at upload time, but the
 # edge rejects requests to it with "error code: 1042" (the workers.dev hostname
