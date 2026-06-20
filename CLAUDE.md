@@ -1,17 +1,24 @@
 # zudo-codemirror-wisdom
 
-Takazudo's personal CodeMirror 6 dev notes. Astro 6 + MDX + Tailwind CSS v4 + React islands. Base path: `/pj/zudo-codemirror/`.
+Takazudo's personal CodeMirror 6 dev notes, built with zudo-doc (zfb stack, MDX, Tailwind CSS v4). Base path: `/`.
 
 ## Commands
 
 ```bash
-pnpm dev          # Start Astro dev server (port 8847)
-pnpm build        # Build static site to dist/
-pnpm build:cm6    # Rebuild CodeMirror IIFE bundle
-pnpm preview      # Preview built site
-pnpm check        # Astro type checking
-pnpm format:md    # Format MDX files
-pnpm b4push       # Pre-push validation (cm6 bundle + format + typecheck + build)
+pnpm dev                   # Start zfb dev server (port 4321)
+pnpm build                 # Build: pnpm build:cm6 && zfb build
+pnpm build:cm6             # Rebuild CodeMirror IIFE bundle
+pnpm preview               # Preview built site via zfb preview
+pnpm check                 # zfb type checking
+pnpm check:html            # Validate built HTML
+pnpm check:links           # Check for broken links
+pnpm check:pin-parity      # Verify pin parity
+pnpm check:wrangler-pin    # Verify wrangler pin
+pnpm check:template-drift  # Check for template drift
+pnpm format:md             # Format MDX files
+pnpm format:md:check       # Check MDX formatting without writing
+pnpm b4push                # Pre-push validation (cm6 bundle + format + typecheck + build)
+pnpm setup:doc-skill       # Generate codemirror-wisdom skill + symlink all skills
 ```
 
 ## Content Structure
@@ -20,7 +27,7 @@ pnpm b4push       # Pre-push validation (cm6 bundle + format + typecheck + build
 - Japanese: `src/content/docs-ja/` -> `/ja/docs/...`
 - Japanese docs mirror the English directory structure
 
-**Bilingual rule**: When adding or modifying EN content, update the corresponding JA file. Keep code blocks and `<HtmlPreview>` blocks identical between languages -- only translate surrounding prose. If a Japanese version does not yet exist, create it.
+**Bilingual rule**: When adding or modifying EN content, update the corresponding JA file in the same PR. Keep code blocks and `<HtmlPreview>` blocks identical between languages -- only translate surrounding prose. If a Japanese version does not yet exist, create it.
 
 **Exception**: Pages with `generated: true` in frontmatter (e.g., claude-resources auto-generated pages) do not require Japanese translations.
 
@@ -46,7 +53,7 @@ All documentation files use `.mdx` format with YAML frontmatter.
 
 ### Frontmatter Fields
 
-Schema defined in `src/content.config.ts`:
+Schema defined in `src/config/docs-schema.ts` (collections registered in `zfb.config.ts`):
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -65,6 +72,9 @@ Schema defined in `src/content.config.ts`:
 | `search_exclude` | boolean | No | Exclude from search results |
 | `pagination_next` | string/null | No | Override next page link (null to hide) |
 | `pagination_prev` | string/null | No | Override prev page link (null to hide) |
+| `doc_history` | boolean | No | Show/hide the doc history widget for this page |
+| `category_no_page` | boolean | No | Make the index.mdx a non-linked sidebar header (frontmatter form of `_category_.json` `noPage`) |
+| `category_sort_order` | "asc"/"desc" | No | Override child sort direction for a category index |
 
 ### Content Rules
 
@@ -102,7 +112,12 @@ Content here.
 <Note>Short note content.</Note>
 ```
 
-Types: `<Note>`, `<Tip>`, `<Info>`, `<Warning>`, `<Danger>`
+Types: `<Note>`, `<Tip>`, `<Info>`, `<Warning>`, `<Danger>`, `<Caution>`
+
+Additional directives:
+
+- `:::details[Summary text]` - Collapsible section
+- `:::code-group` - Tabbed code block group
 
 ### Mermaid Diagrams
 
@@ -132,6 +147,7 @@ Pre-built IIFE bundle at `public/assets/cm6-bundle.min.js` exposes `window.CM` i
 - Rebuild: `pnpm build:cm6` (entry: `scripts/cm6-bundle-entry.ts`)
 - `js` prop: runtime code using `CM.*` globals
 - `displayJs` prop: clean ESM imports shown in "Show code" panel
+- The bundle is injected via `settings.htmlPreview.head` (base `/`, path `/assets/cm6-bundle.min.js`)
 - Keep HtmlPreview blocks identical in EN/JA -- only translate surrounding text.
 
 ## Navigation Structure
@@ -160,7 +176,7 @@ Use `_category_.json` for category-level metadata when needed:
 }
 ```
 
-The `noPage: true` flag means the category has no landing page (just groups items).
+The `noPage: true` flag means the category has no landing page (just groups items). Alternatively, use `category_no_page: true` in an `index.mdx` frontmatter.
 
 ### Header Navigation
 
@@ -200,12 +216,32 @@ The `codemirror-wisdom` skill (`.claude/skills/codemirror-wisdom/SKILL.md`) is *
 
 Available globally in MDX without imports:
 
-- `<Note>`, `<Tip>`, `<Info>`, `<Warning>`, `<Danger>` - Admonitions
+- `<Note>`, `<Tip>`, `<Info>`, `<Warning>`, `<Danger>`, `<Caution>` - Admonitions
 - `<HtmlPreview>` - Interactive HTML/CSS/JS preview with code display
+
+## Project Layout
+
+```
+pages/          # Host-app routing layer (zfb entry points)
+src/
+  components/   # Shared UI components
+  config/       # settings.ts — site-wide config, docs-schema.ts — frontmatter schema
+  content/      # MDX doc pages (docs/ + docs-ja/)
+  utils/        # Shared utilities
+plugins/        # zfb integration plugins (.mjs)
+zfb.config.ts   # Build config (framework, collections, plugins, adapter)
+```
+
+## Site Config
+
+- Base path: `/` (root — no subpath prefix)
+- Live URL: `https://zudo-codemirror-wisdom.takazudomodular.com/`
+- Settings: `src/config/settings.ts`
+- Build config: `zfb.config.ts`
 
 ## CI/CD
 
-- PR checks: typecheck + build + Cloudflare Pages preview
-- Main deploy: build + Cloudflare Pages production + IFTTT notification
-- Secrets: CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, IFTTT_PROD_NOTIFY
-- Cloudflare Pages project: `zudo-codemirror-wisdom`
+- PR checks: typecheck + build + Cloudflare Workers static assets preview
+- Main deploy: build -> `wrangler deploy` -> Cloudflare Workers + IFTTT notification
+- Hosting: **Cloudflare Workers static assets** (not Pages)
+- Secrets: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_API_TOKEN`, `IFTTT_PROD_NOTIFY`
