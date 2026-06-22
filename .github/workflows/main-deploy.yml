@@ -75,6 +75,9 @@ jobs:
           path: dist/
           retention-days: 1
           if-no-files-found: error
+          # github.run_id is reused on "Re-run all jobs"; without overwrite the
+          # re-run's upload fails because the artifact name already exists.
+          overwrite: true
 
   # ---------------------------------------------------------------------------
   # Job: HTML validate
@@ -155,6 +158,8 @@ jobs:
           path: doc-history-out/
           retention-days: 1
           if-no-files-found: error
+          # Rerunnable: github.run_id is reused on "Re-run all jobs".
+          overwrite: true
 
   # ---------------------------------------------------------------------------
   # Job 3: Deploy to Cloudflare Workers (production)
