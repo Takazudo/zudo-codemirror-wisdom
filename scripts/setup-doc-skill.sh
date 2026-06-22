@@ -7,6 +7,17 @@ set -euo pipefail
 # the user-scope skills directory (~/.claude/skills/).
 # ────────────────────────────────────────────────────────
 
+# Parse flags. --silent (alias -y) skips the interactive prompt so the
+# automated/non-interactive flow doesn't fail on EOF under `set -e`.
+SILENT=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --silent|-y) SILENT="true" ;;
+    *) echo "Error: unknown argument '$1'"; exit 1 ;;
+  esac
+  shift
+done
+
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Read project name from package.json (used in the generated SKILL.md description/title text)
@@ -15,12 +26,16 @@ PROJECT_NAME=$(node -e "console.log(require('$ROOT_DIR/package.json').name || 'm
 # entry and CLAUDE.md, which both reference `test-wisdom`. See issue #78.
 DEFAULT_SKILL_NAME="codemirror-wisdom"
 
-# Prompt for skill name
-echo ""
-echo "=== zudo-doc Skill Setup ==="
-echo ""
-read -rp "Skill name [$DEFAULT_SKILL_NAME]: " SKILL_NAME
-SKILL_NAME="${SKILL_NAME:-$DEFAULT_SKILL_NAME}"
+# Prompt for skill name (skipped under --silent: use the pinned default directly)
+if [ -n "$SILENT" ]; then
+  SKILL_NAME="$DEFAULT_SKILL_NAME"
+else
+  echo ""
+  echo "=== zudo-doc Skill Setup ==="
+  echo ""
+  read -rp "Skill name [$DEFAULT_SKILL_NAME]: " SKILL_NAME
+  SKILL_NAME="${SKILL_NAME:-$DEFAULT_SKILL_NAME}"
+fi
 
 # Validate skill name (allow only alphanumeric, hyphens, underscores)
 if [[ ! "$SKILL_NAME" =~ ^[a-zA-Z0-9_-]+$ ]]; then
