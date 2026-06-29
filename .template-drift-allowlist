@@ -30,7 +30,6 @@ scripts/run-b4push.sh
 # inject feature-specific code at scaffold time. Production has these slots
 # resolved (removed) and the real implementations inlined for this site's
 # enabled features (imageEnlarge, docHistory, etc.).
-pages/_mdx-components.ts
 pages/lib/_body-end-islands.tsx
 src/config/settings-types.ts
 src/styles/global.css
@@ -52,8 +51,6 @@ src/components/image-enlarge.tsx
 # rule live in the already-allowlisted src/styles/global.css.
 pages/index.tsx
 pages/[locale]/index.tsx
-pages/lib/_doc-content-header.tsx
-pages/lib/_doc-page-shell.tsx
 
 # ── Feature intentionally OFF: docTags / tagGovernance ────────────────────
 # docTags is `false` and tagGovernance is `off` in settings.ts. The docTags /
