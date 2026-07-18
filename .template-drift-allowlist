@@ -6,58 +6,30 @@
 # Format: one repo-relative path per line (no leading slash).
 # Blank lines and `#` comments are ignored.
 #
-# Every entry below maps to one of three reasons: a host customization, a
-# feature intentionally left off, or a generated/runtime artifact. Reconciled
-# for the zudo-doc 1.x package-first ("1 package style") baseline.
+# Reconciled for the @takazudo/zudo-doc 4.2.1 "Minimal Scaffold" baseline. The
+# v4 template file set that check:template-drift compares against is small:
+#   base:    pages/index.tsx, pages/docs/[[...slug]].tsx,
+#            scripts/setup-doc-skill.sh, src/styles/global.css, tsconfig.json
+#   i18n:    pages/[locale]/docs/[[...slug]].tsx
+# pages/index.tsx, scripts/setup-doc-skill.sh, and tsconfig.json are kept
+# byte-identical to the v4 templates (no entry needed).
 #
 # NOTE: this repo's CodeMirror domain (scripts/cm6-bundle-entry.ts,
 # scripts/build-cm6-bundle.sh, public/assets/cm6-bundle.min.js, the
 # settings.htmlPreview.head injection, and the window.CM demo MDX) is NOT
 # template-owned, so it never appears in the drift check and needs no entry here.
 
-# ── Generated / runtime artifact ──────────────────────────────────────────
-# .zfb/ is gitignored; doc-history-meta.json is written at build time by the
-# doc-history plugin and does not exist in the working tree.
-.zfb/doc-history-meta.json
+# ── docHistory-patched doc-route stubs ────────────────────────────────────
+# The docHistory feature patches both doc catch-all route stubs to statically
+# import DocHistory and merge it into the chrome bindings. The generator emits
+# this patched form (present in a fresh v4 scaffold with docHistory on), but the
+# UNPATCHED base/i18n templates ship without the DocHistory wiring, so the drift
+# check flags them. These are the scaffolder's own patched output.
+pages/docs/[[...slug]].tsx
+pages/[locale]/docs/[[...slug]].tsx
 
-# ── Host customization: customized b4push gate ────────────────────────────
-# scripts/run-b4push.sh is the full 8-step gate (format + drift + pin-parity +
-# wrangler-pin + check + build + html + links), replacing the template default.
-scripts/run-b4push.sh
-
-# ── Host customization: resolved compose @slot markers ────────────────────
-# The base template ships @slot: injection markers so the compose framework can
-# inject feature-specific code at scaffold time. Production has these slots
-# resolved (removed) and the real implementations inlined for this site's
-# enabled features (imageEnlarge, docHistory, etc.).
-pages/lib/_body-end-islands.tsx
-src/config/settings-types.ts
+# ── Host customization: brand typography (Futura) + Noto body font ────────
+# src/styles/global.css re-applies the --font-noto / --font-futura brand tokens,
+# points --font-sans at Noto, and adds the [data-header-logo] + h1.text-heading
+# Futura rules on top of the regenerated v4 base global.css.
 src/styles/global.css
-
-# ── Feature island shims (base no-op stub vs. feature re-export shim) ──────
-# The base template ships no-op W6A stubs for these island components so imports
-# resolve in a feature-off scaffold. This site enables the corresponding
-# features (sidebarToggle / docHistory / imageEnlarge), so it ships the feature
-# template's thin re-export shim pointing at the package island, which the drift
-# check flags against the base-template stub.
-src/components/desktop-sidebar-toggle.tsx
-src/components/doc-history.tsx
-src/components/image-enlarge.tsx
-
-# ── Host customization: brand typography (Futura) ─────────────────────────
-# The page-title <h1> elements carry the `font-futura` utility + `font-normal`
-# to restore the pre-zfb site's normal-weight Futura titles (the base template
-# ships `font-bold`). The `--font-futura` token + the header `[data-header-logo]`
-# rule live in the already-allowlisted src/styles/global.css.
-pages/index.tsx
-pages/[locale]/index.tsx
-
-# ── Feature intentionally OFF: docTags / tagGovernance ────────────────────
-# docTags is `false` and tagGovernance is `off` in settings.ts. The docTags /
-# tagGovernance feature templates ship these files, but this site does not
-# scaffold them. The tag data model + frontmatter field are kept for future use;
-# the tag pages and audit scripts are intentionally absent. (The tags *routes*
-# themselves are package-owned under packageOwnedRoutes, so no page stubs exist.)
-pages/lib/_tag-pages.tsx
-scripts/tags-audit.ts
-scripts/tags-suggest.ts

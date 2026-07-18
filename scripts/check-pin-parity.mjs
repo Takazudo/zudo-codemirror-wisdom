@@ -34,6 +34,7 @@ const ZFB_PACKAGES = [
   "@takazudo/zfb",
   "@takazudo/zfb-runtime",
   "@takazudo/zfb-adapter-cloudflare",
+  "@takazudo/zfb-md-wasm",
 ];
 
 const ZUDO_DOC_PACKAGES = [
