@@ -15,7 +15,7 @@ export type {
   ChangelogConfig,
   SiteHeadConfig,
   MetaTagsConfig,
-} from "./settings-types";
+} from "@takazudo/zudo-doc/settings";
 import type {
   HeaderNavItem,
   HeaderRightItem,
@@ -31,7 +31,7 @@ import type {
   ChangelogConfig,
   SiteHeadConfig,
   MetaTagsConfig,
-} from "./settings-types";
+} from "@takazudo/zudo-doc/settings";
 
 export const settings = {
   colorScheme: "Default Dark",
@@ -45,6 +45,10 @@ export const settings = {
   siteDescription: "Takazudo's CodeMirror 6 dev notes for me and AI agents" as string,
   base: "/",
   trailingSlash: false as boolean,
+  // Preserve the 3.1.0 (unminified) HTML baseline. v4 defaults minifyHtml to
+  // true; kept false here so the check:html gate validates the same
+  // human-readable output shape as before the rescaffold.
+  minifyHtml: false as boolean,
   noindex: false as boolean,
   editUrl: false as string | false,
   githubUrl: "https://github.com/Takazudo/zudo-codemirror-wisdom" as string | false,
@@ -103,7 +107,6 @@ export const settings = {
   designTokenPanel: false as boolean,
   tocMinDepth: 2 as number,
   tocMaxDepth: 4 as number,
-  headingIdStrategy: "hierarchical" as "flat" | "hierarchical",
   sidebarResizer: true as boolean,
   sidebarToggle: true as boolean,
   imageEnlarge: true as boolean,
@@ -118,10 +121,16 @@ export const settings = {
   claudeResources: {
     claudeDir: ".claude",
   } as { claudeDir: string; projectRoot?: string; scanRoot?: string } | false,
+  // The claude-resources plugin generates these categories at build time from
+  // .claude/ + CLAUDE.md. At v4 the plugin also emits claude-agents /
+  // claude-commands, so they are listed here too — all Claude content is
+  // default-locale-only (no JA fallback routes).
   defaultLocaleOnlyPrefixes: [
     "/docs/claude/",
     "/docs/claude-md/",
     "/docs/claude-skills/",
+    "/docs/claude-agents/",
+    "/docs/claude-commands/",
   ] as string[],
   footer: {
     links: [],
@@ -141,9 +150,11 @@ export const settings = {
     { type: "component", component: "search" },
     { type: "component", component: "language-switcher" },
   ] satisfies HeaderRightItem[] as HeaderRightItem[],
-  // Enable the package-owned route-injection plugin (@takazudo/zudo-doc/plugins/routes):
-  // the 3.x package supplies the docs / 404 / sitemap / robots / tags / versions routes
-  // at build time, so the host no longer ships those page stubs. zudoDocPreset() does NO
-  // defaulting — omitting this field is treated as off (routes would not be injected).
+  // Package-owned route injection (@takazudo/zudo-doc/plugins/routes): the v4
+  // package supplies the 404 / sitemap / robots / tags / versions routes at
+  // build time. The host still ships the doc catch-all stubs
+  // (pages/docs/[[...slug]].tsx + the locale variant) because injected DYNAMIC
+  // routes 404 in `zfb dev` — see the header comment in those files. Default is
+  // true; kept explicit for clarity.
   packageOwnedRoutes: true,
 };

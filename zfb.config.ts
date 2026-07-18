@@ -1,13 +1,12 @@
 import { defineConfig } from "zfb/config";
-import { zudoDocPreset } from "@takazudo/zudo-doc/preset";
+import { zudoDoc } from "@takazudo/zudo-doc/config";
 import { settings } from "./src/config/settings";
-import { buildDocsSchema } from "./src/config/docs-schema";
-import { translations } from "./src/config/i18n";
-import { colorSchemes } from "./src/config/color-schemes";
 
-// The seven canonical directives registered in pages/_mdx-components.ts.
-// "details" routes to DetailsWrapper — a collapsible, NOT an admonition.
-const directiveVocabulary = {
+// The canonical seven content directives (directive name -> JSX component
+// name). Identical to @takazudo/zudo-doc/directive-vocabulary-defaults; passed
+// explicitly so the mapping is visible at the config site. `details` routes to
+// the collapsible Details wrapper, NOT an admonition.
+const directives = {
   note: "Note",
   tip: "Tip",
   info: "Info",
@@ -17,20 +16,21 @@ const directiveVocabulary = {
   details: "Details",
 };
 
-export default defineConfig({
-  // ── Host-owned shell fields ──────────────────────────────────────────────
-  framework: "preact",
-  // Pin the dev/preview port — zfb defaults to 3000, but the generated
-  // CLAUDE.md and the Tauri dev wrappers assume 4321.
-  port: 4321,
-  tailwind: { enabled: true },
-  // Public URL prefix for <link rel="stylesheet"> and <script> tags.
-  base: settings.base,
-  // Cloudflare adapter — required for the Workers deploy and any
-  // non-prerendered (package-owned api-ai-chat) routes. Bindings via wrangler.toml.
-  adapter: "@takazudo/zfb-adapter-cloudflare",
-
-  // ── Preset-owned fields (content collections, plugins, markdown,
-  //    codeHighlight, resolveMarkdownLinks, trailingSlash, package-owned routes) ──
-  ...zudoDocPreset({ settings, buildDocsSchema, directiveVocabulary, translations, colorSchemes }),
-});
+// v4 single-entry config (zudolab/zudo-doc#2651 "Minimal Scaffold"): zudoDoc()
+// returns a COMPLETE ZfbConfig — framework "preact", tailwind, content
+// collections, markdown pipeline, and the package-owned routes — by shallow-
+// merging the fields below over its documented defaults. Host shell fields
+// (port / adapter / directives) are accepted directly by zudoDoc(); `base`
+// rides in via ...settings.
+export default defineConfig(
+  zudoDoc({
+    ...settings,
+    directives,
+    // Dev/preview port. zfb defaults to 3000; the generated CLAUDE.md and the
+    // doc-history dev server assume 4321.
+    port: 4321,
+    // Cloudflare Workers adapter — required for the Workers static-assets
+    // deploy and the package-owned api-ai-chat route. Bindings via wrangler.toml.
+    adapter: "@takazudo/zfb-adapter-cloudflare",
+  }),
+);
