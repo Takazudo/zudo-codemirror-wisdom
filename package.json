@@ -25,11 +25,11 @@
     "format:md": "pnpm dlx @takazudo/mdx-formatter --write \"src/content/**/*.{md,mdx}\"",
     "format:md:check": "pnpm dlx @takazudo/mdx-formatter --check \"src/content/**/*.{md,mdx}\"",
     "b4push": "bash scripts/run-b4push.sh",
-    "setup:doc-skill": "bash scripts/setup-doc-skill.sh",
-    "setup:doc-skill-silent": "bash scripts/setup-doc-skill.sh --silent",
-    "setup:doc-skill:claude": "bash scripts/setup-doc-skill.sh --target claude",
-    "setup:doc-skill:codex": "bash scripts/setup-doc-skill.sh --target codex",
-    "setup:doc-skill:both": "bash scripts/setup-doc-skill.sh --target both"
+    "setup:doc-skill": "SKILL_NAME=codemirror-wisdom bash scripts/setup-doc-skill.sh",
+    "setup:doc-skill-silent": "SKILL_NAME=codemirror-wisdom bash scripts/setup-doc-skill.sh --silent",
+    "setup:doc-skill:claude": "SKILL_NAME=codemirror-wisdom bash scripts/setup-doc-skill.sh --target claude",
+    "setup:doc-skill:codex": "SKILL_NAME=codemirror-wisdom bash scripts/setup-doc-skill.sh --target codex",
+    "setup:doc-skill:both": "SKILL_NAME=codemirror-wisdom bash scripts/setup-doc-skill.sh --target both"
   },
   "dependencies": {
     "@takazudo/zfb": "0.1.0-next.89",

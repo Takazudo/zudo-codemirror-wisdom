@@ -53,7 +53,7 @@ All documentation files use `.mdx` format with YAML frontmatter.
 
 ### Frontmatter Fields
 
-Schema defined in `src/config/docs-schema.ts` (collections registered in `zfb.config.ts`):
+The docs frontmatter schema is provided by `@takazudo/zudo-doc` (v4 package default), wired via `zudoDoc()` in `zfb.config.ts`:
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -225,7 +225,7 @@ Available globally in MDX without imports:
 pages/          # Host-app routing layer (zfb entry points)
 src/
   components/   # Shared UI components
-  config/       # settings.ts — site-wide config, docs-schema.ts — frontmatter schema
+  config/       # settings.ts — site-wide config (frontmatter schema is package-provided)
   content/      # MDX doc pages (docs/ + docs-ja/)
   utils/        # Shared utilities
 plugins/        # zfb integration plugins (.mjs)
