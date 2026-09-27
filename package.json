@@ -34,7 +34,6 @@
     "setup:doc-skill:both": "SKILL_NAME=codemirror-wisdom bash scripts/setup-doc-skill.sh --target both"
   },
   "dependencies": {
-    "@takazudo/zdtp": "0.8.5",
     "@takazudo/zfb": "2.22.0",
     "@takazudo/zfb-adapter-cloudflare": "2.22.0",
     "@takazudo/zfb-md-wasm": "2.22.0",
