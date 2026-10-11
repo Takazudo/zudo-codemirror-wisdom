@@ -4,8 +4,6 @@ description: "@replit/codemirror-vim でカスタム Vim キーマッピング�
 sidebar_position: 4
 ---
 
-# カスタムキーマッピング
-
 `@replit/codemirror-vim` は、Vim スタイルのキーマッピングを定義するためのプログラマティック API を提供します。これらは `:map` や `:noremap` の Ex コマンドと同様に動作しますが、JavaScript/TypeScript から呼び出します。
 
 ## コアマッピング API
@@ -178,3 +176,31 @@ Vim.noremap("k", "gk", "normal");
 `.vimrc` でのベストプラクティスと同様に、再帰的な展開が明確に必要な場合を除き、`map` / `nmap` / `imap` / `vmap` よりも `noremap` / `nnoremap` / `inoremap` / `vnoremap` を優先してください。
 
 </Tip>
+
+## Vim と CodeMirror のキーマップ優先順位
+
+Vim は自身に割り当てられたキーを処理し、未処理のイベントを他の CodeMirror キーマップへ渡す。共有エディター拡張より前に `vim()` を置いても、後続の割り当ては無効にならない。未割り当てのキーは `searchKeymap` や補完コマンドを実行する場合がある。
+
+macOS では Vim は通常 Cmd+D を割り当てていない。CodeMirror の `searchKeymap` は `Mod-d` を `selectNextOccurrence` に割り当てるため、ビジュアル選択中に別の一致箇所を選択して画面をスクロールし、前方の一致箇所へ折り返す場合もある。[issue #874](https://github.com/zudolab/zudo-text/issues/874) に対応した [zudo-text PR #910](https://github.com/zudolab/zudo-text/pull/910) の修正では、Vim が有効な場合だけこのキーを消費する。
+
+```ts
+import { keymap } from "@codemirror/view";
+import { searchKeymap } from "@codemirror/search";
+import { vim } from "@replit/codemirror-vim";
+
+const vimEnabled = true;
+const extensions = [
+  ...(vimEnabled
+    ? [vim(), keymap.of([{ key: "Mod-d", run: () => true }])]
+    : []),
+  keymap.of(searchKeymap),
+];
+```
+
+何もしないハンドラーでも `true` を返すことで処理済みとなり、後続の CodeMirror の割り当てを止める。`preventDefault: true` はブラウザーの既定動作を抑制する指定であり、成功を返すコマンドハンドラーの代わりにはならない。ブロッカーは共有検索キーマップと同じ優先度で、その前に置く。共有キーマップを `Prec.high` で包むと、そちらが先に実行される場合がある。
+
+`Mod-d` は macOS では Cmd+D、Linux/Windows では Ctrl+D を意味する。この順序なら Mac 以外では Vim が本来の Ctrl+D（半ページ下へのスクロール）を先に処理する。Vim 無効時にはブロッカーがなく、CodeMirror の次の一致箇所を選択する機能が残る。導入時には macOS のノーマル・ビジュアル・矩形選択モード、Mac 以外の Ctrl+D、Vim 無効時の動作を確認する。
+
+他のショートカットに違和感があれば、有効なキーマップ全体を確認する。`Mod-Alt-g`、`Mod-Shift-l`、補完キーマップの Escape も調査候補になる。未割り当てのキーをすべて無効にせず、確認できた競合だけを止める。
+
+参考: [CodeMirror KeyBinding](https://codemirror.net/docs/ref/#view.KeyBinding)。

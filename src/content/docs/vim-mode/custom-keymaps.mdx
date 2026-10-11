@@ -4,8 +4,6 @@ description: Define custom vim key mappings, leader keys, and mode-specific bind
 sidebar_position: 4
 ---
 
-# Custom Key Mappings
-
 `@replit/codemirror-vim` provides a programmatic API for defining vim-style key mappings. These work the same way as `:map` and `:noremap` Ex commands but are called from JavaScript/TypeScript.
 
 ## Core Mapping API
@@ -178,3 +176,31 @@ Vim.noremap("k", "gk", "normal");
 Following the same best practice as in a `.vimrc`, prefer `noremap` / `nnoremap` / `inoremap` / `vnoremap` over `map` / `nmap` / `imap` / `vmap` unless you specifically need recursive expansion.
 
 </Tip>
+
+## Vim and CodeMirror keymap precedence
+
+Vim handles its mapped keys and lets unhandled events reach other CodeMirror keymaps. Putting `vim()` before the shared editor extensions does not disable those later bindings: an unbound key can still trigger `searchKeymap` or completion commands.
+
+On macOS, Vim does not normally bind Cmd+D. CodeMirror's `searchKeymap` binds `Mod-d` to `selectNextOccurrence`; during a visual selection this can select another occurrence and scroll the viewport, including wrapping to an earlier match. The applied fix in [zudo-text PR #910](https://github.com/zudolab/zudo-text/pull/910), tracked by [issue #874](https://github.com/zudolab/zudo-text/issues/874), consumes that key only when Vim is enabled:
+
+```ts
+import { keymap } from "@codemirror/view";
+import { searchKeymap } from "@codemirror/search";
+import { vim } from "@replit/codemirror-vim";
+
+const vimEnabled = true;
+const extensions = [
+  ...(vimEnabled
+    ? [vim(), keymap.of([{ key: "Mod-d", run: () => true }])]
+    : []),
+  keymap.of(searchKeymap),
+];
+```
+
+The no-op returns `true` to mark the event handled and stop later CodeMirror bindings. `preventDefault: true` only requests suppression of the browser's default action; it does not replace a successful command handler. Keep the blocker before the shared search keymap, at the same precedence; a shared map wrapped in `Prec.high` can otherwise outrank it.
+
+`Mod-d` means Cmd+D on macOS and Ctrl+D on Linux/Windows. With this ordering, Vim handles its native Ctrl+D half-page scroll first on non-Mac platforms. With Vim disabled, the blocker is absent and CodeMirror's normal select-next-occurrence command remains available. Check normal, visual and visual-block modes on macOS, native Ctrl+D on non-Mac, and the Vim-disabled editor when adopting the pattern.
+
+If another shortcut behaves unexpectedly, inspect the entire active keymap stack: `Mod-Alt-g`, `Mod-Shift-l` and completion-keymap Escape are useful places to look. Block only a confirmed conflict, rather than swallowing all unbound keys.
+
+Reference: [CodeMirror KeyBinding](https://codemirror.net/docs/ref/#view.KeyBinding).
