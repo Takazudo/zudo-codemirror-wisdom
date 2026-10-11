@@ -1,6 +1,6 @@
 # zudo-codemirror-wisdom
 
-Takazudo's personal CodeMirror 6 dev notes, built with zudo-doc (zfb stack, MDX, Tailwind CSS v4). Base path: `/`.
+Takazudo's personal CodeMirror 6 dev notes, built with zudo-doc (zfb stack, MDX, zudo-react and zudo-wind). Base path: `/`.
 
 ## Commands
 
@@ -53,7 +53,7 @@ All documentation files use `.mdx` format with YAML frontmatter.
 
 ### Frontmatter Fields
 
-The docs frontmatter schema is provided by `@takazudo/zudo-doc` (v4 package default), wired via `zudoDoc()` in `zfb.config.ts`:
+The docs frontmatter schema is provided by `@takazudo/zudo-doc` (v6 package default), wired via `zudoDoc()` in `zfb.config.ts`:
 
 | Field | Type | Required | Description |
 |---|---|---|---|

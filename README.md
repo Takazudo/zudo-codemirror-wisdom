@@ -1,6 +1,6 @@
 # zudo-codemirror-wisdom
 
-Takazudo's personal CodeMirror 6 development notes, built with zudo-doc (zfb stack, MDX, Tailwind CSS v4).
+Takazudo's personal CodeMirror 6 development notes, built with zudo-doc (zfb stack, MDX, zudo-react and zudo-wind).
 
 **Live site**: <https://zudo-codemirror-wisdom.takazudomodular.com/>
 

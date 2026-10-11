@@ -15,7 +15,7 @@ const directives = {
   details: "Details",
 };
 
-// zudoDoc() returns a complete ZfbConfig — framework "preact", Tailwind,
+// zudoDoc() returns a complete ZfbConfig — zudo-react, zudo-wind,
 // content collections, the markdown pipeline, and package-owned routes — by
 // shallow-merging these host settings over its documented defaults. Keep the
 // fields literal here so scaffold tooling can inspect base and locale paths.
