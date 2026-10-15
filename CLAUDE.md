@@ -2,6 +2,10 @@
 
 Takazudo's personal CodeMirror 6 dev notes, built with zudo-doc (zfb stack, MDX, zudo-react and zudo-wind). Base path: `/`.
 
+## Runtime
+
+Use Node.js 24 (`>=24 <25`) and the pnpm version pinned in `package.json`.
+
 ## Commands
 
 ```bash
@@ -53,7 +57,7 @@ All documentation files use `.mdx` format with YAML frontmatter.
 
 ### Frontmatter Fields
 
-The docs frontmatter schema is provided by `@takazudo/zudo-doc` (v6 package default), wired via `zudoDoc()` in `zfb.config.ts`:
+The docs frontmatter schema is provided by `@takazudo/zudo-doc` (v7 package default), wired via `zudoDoc()` in `zfb.config.ts`:
 
 | Field | Type | Required | Description |
 |---|---|---|---|

@@ -4,6 +4,8 @@ Takazudo's personal CodeMirror 6 development notes, built with zudo-doc (zfb sta
 
 **Live site**: <https://zudo-codemirror-wisdom.takazudomodular.com/>
 
+Use Node.js 24 (`>=24 <25`) and the pnpm version pinned in `package.json`.
+
 ## Commands
 
 ```bash

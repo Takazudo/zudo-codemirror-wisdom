@@ -34,6 +34,8 @@
     'Segoe UI', 'Noto Sans', 'Noto Sans JP', 'Hiragino Sans', sans-serif;
 
   --font-sans: var(--font-noto);
+  --zdc-header-logo-font: var(--font-futura);
+  --zdc-header-logo-weight: var(--font-weight-normal, 400);
 }
 
 /* Futura on the header site name. The header logo is rendered by the
