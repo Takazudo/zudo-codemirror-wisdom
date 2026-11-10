@@ -1,4 +1,4 @@
-# Intentional differences from published create-zudo-doc@7.0.0 base/i18n templates.
+# Intentional differences from published create-zudo-doc@10.0.0 base/i18n templates.
 # Both doc route stubs include the generator's docHistory feature patch:
 # DocHistoryBoundary from doc-history-area, bound through defineChromeBindings.
 pages/docs/[[...slug]].tsx
