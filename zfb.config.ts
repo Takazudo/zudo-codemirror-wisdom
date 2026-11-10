@@ -21,6 +21,10 @@ const directives = {
 // fields literal here so scaffold tooling can inspect base and locale paths.
 export default defineConfig(
   zudoDoc({
+    // Appearance layer only (scaffold light/dark pair). themePack is omitted
+    // on purpose: zudo-doc 10 resolves that to Graphite, the default pack.
+    // Do not pin "default" (now an alias of graphite) or list both in
+    // themePacks — that pair fails the build. "classic" is the old look.
     colorScheme: "Default Dark",
     colorMode: {
       defaultMode: "dark",
